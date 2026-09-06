@@ -18,3 +18,6 @@ dist/
 # 系统
 Thumbs.db
 .DS_Store
+
+# 运行时日志
+debug.log
