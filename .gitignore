@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Java / Gradle
+mcmod/build/
+mcmod/.gradle/
+mcmod/run/
+*.class
+
+# Blender
+*.blend1
+
+# 发行包（由打包脚本生成）
+dist/
+
+# 系统
+Thumbs.db
+.DS_Store

@@ -1,0 +1,9 @@
+{
+  "required": true,
+  "package": "com.zcube.mcbridge.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "*": ["WorldChunkMixin"],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

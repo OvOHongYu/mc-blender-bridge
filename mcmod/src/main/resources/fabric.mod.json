@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "mcbridge",
+  "version": "${version}",
+  "name": "MC Bridge 数据服务",
+  "description": "在 127.0.0.1 暴露区块几何数据 HTTP API，供 Blender 桥接插件动态加载世界。仅监听本机回环。",
+  "authors": ["zcube"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["com.zcube.mcbridge.McBridge"]
+  },
+  "mixins": ["mcbridge.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "fabric-api": "*",
+    "minecraft": "~1.21.1",
+    "java": ">=21"
+  }
+}
