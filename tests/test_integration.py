@@ -76,7 +76,7 @@ class TestIntegration(unittest.TestCase):
         for dx in (-1, 0, 1):
             for dz in (-1, 0, 1):
                 payloads[(dx, dz)] = self.client.chunk("overworld", 0 + dx, 0 + dz, ymin, ymax)
-        quads, pal, _ = mesher.mesh_payload(payloads, with_ao=True)
+        quads, pal, _, _ = mesher.mesh_payload(payloads, with_ao=True)
         m = self.client.mesh("overworld", 0, 0, ymin, ymax, lod=0, ao=True, leaves="fancy")
         self.assertEqual(len(quads), len(m["dirs"]))
         for i, (v, d, b, ao) in enumerate(quads):

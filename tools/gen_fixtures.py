@@ -97,8 +97,8 @@ def main():
     cross = np.zeros(len(pal), bool)
     for i, (c, name) in enumerate(pal):
         cross[i] = (c == B.CUTOUT) and ("leaves" not in name)
-    quads = mesher.mesh_padded(cls, gid, with_ao=True, leaves_fast=False,
-                               cross=cross)
+    quads, _ = mesher.mesh_padded(cls, gid, with_ao=True, leaves_fast=False,
+                                  cross=cross)
 
     mcm1 = codec.encode_mcm1("overworld", 0, 0, 0, pal, quads, with_ao=True)
     with open(os.path.join(FIX_DIR, "mcm1_sample.bin"), "wb") as f:

@@ -87,26 +87,97 @@ def _transparent(block):
 
 
 def get_material(block, facegrp, tex_fetcher=None):
-    """主线程调用：返回材质（必要时先建占位材质），并安排贴图后台拉取。
+    """主线程调用：返回材质，贴图来源优先级 资产包 > 服务端拉取。
     tex_fetcher(block, facegrp) -> PNG bytes（后台线程执行）。"""
     global _fetcher_ref
     if tex_fetcher is not None:
         _fetcher_ref = tex_fetcher
     name = material_name(block, facegrp)
     mat = bpy.data.materials.get(name)
-    need_tex = False
+    if mat is not None and _has_image_node(mat):
+        return mat
     if mat is None:
         mat = bpy.data.materials.new(name)
         _setup_placeholder(mat, block)
-        need_tex = True
-    elif not _has_image_node(mat):
-        need_tex = True        # 材质在但贴图未接入（如上次拉取失败）-> 重试
-    if need_tex and tex_fetcher is not None:
+    # 1. 本地资产包（烘焙贴图）
+    tid = _pack_face_tex(block, facegrp)
+    if tid is not None:
+        _apply_pack_texture(mat, block, tid)
+        return mat
+    # 2. 服务端异步拉取
+    if tex_fetcher is not None:
         with _lock:
             if (block, facegrp) not in _pending:
                 _pending[(block, facegrp)] = {"state": "pending"}
                 _task_q.put((block, facegrp))
-    _ensure_worker()
+        _ensure_worker()
+    return mat
+
+
+def get_material_for(desc, tex_fetcher=None):
+    """材质描述符 -> 材质。
+    ("block", 方块名, facegrp) 或 ("tex", texId)。"""
+    if desc[0] == "tex":
+        return get_model_material(int(desc[1]))
+    return get_material(desc[1], desc[2], tex_fetcher)
+
+
+def _pack():
+    from .core import assets
+    return assets.current()
+
+
+def _pack_face_tex(block, facegrp):
+    pack = _pack()
+    if pack is None:
+        return None
+    faces = pack.default_faces(B.base_name(block))
+    if faces is None:
+        return None
+    tid = {"top": faces[0], "side": faces[1], "bottom": faces[2]}.get(facegrp)
+    return int(tid) if tid is not None else None
+
+
+def _pack_image(pack, tid):
+    """从资产包 RGBA 创建/复用 Blender 图像（主线程）。"""
+    import numpy as np
+    name = "MCBT_pack_%d" % tid
+    img = bpy.data.images.get(name)
+    if img is not None:
+        return img
+    (w, h), rgba = pack.texture_rgba(tid)
+    img = bpy.data.images.new(name, w, h, alpha=True)
+    px = np.frombuffer(rgba, np.uint8).reshape(h, w, 4).astype(np.float32) / 255.0
+    img.pixels.foreach_set(px[::-1].ravel())      # Blender 像素自下而上
+    return img
+
+
+def _tex_has_alpha(pack, tid):
+    import numpy as np
+    _, rgba = pack.texture_rgba(tid)
+    a = np.frombuffer(rgba, np.uint8).reshape(-1, 4)[:, 3]
+    return bool((a < 255).any())
+
+
+def _apply_pack_texture(mat, block, tid):
+    pack = _pack()
+    img = _pack_image(pack, tid)
+    _wire(mat, img, block, transparent=_transparent(block))
+
+
+def get_model_material(tex_id):
+    """烘焙模型面材质（按贴图 id 共享）。"""
+    name = "MCB_tex_%d" % tex_id
+    mat = bpy.data.materials.get(name)
+    if mat is not None:
+        return mat
+    pack = _pack()
+    mat = bpy.data.materials.new(name)
+    if pack is None:
+        _setup_placeholder(mat, "minecraft:stone")
+        return mat
+    img = _pack_image(pack, tex_id)
+    _wire(mat, img, None, transparent=_tex_has_alpha(pack, tex_id))
     return mat
 
 
@@ -159,6 +230,12 @@ def _apply_texture(block, facegrp, png_path):
     if img is None:
         img = bpy.data.images.load(png_path)
         img.name = name
+    _wire(mat, img, block, transparent=_transparent(block))
+
+
+def _wire(mat, img, block, transparent=False):
+    """构造节点树: Image × ColorAttribute("Col") -> Principled。"""
+    mat.use_nodes = True
     nt = mat.node_tree
     nodes, links = nt.nodes, nt.links
     for n in list(nodes):
@@ -187,9 +264,12 @@ def _apply_texture(block, facegrp, png_path):
     links.new(vcol.outputs["Color"], mix.inputs["Color2"])
     links.new(mix.outputs["Color"], bsdf.inputs["Base Color"])
     links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
-    if _transparent(block):
+    if transparent:
         links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
-        mat.blend_method = 'BLEND' if B.block_info(block)[1] == B.LIQUID else 'CLIP'
+        if block is not None and B.block_info(block)[1] == B.LIQUID:
+            mat.blend_method = 'BLEND'
+        else:
+            mat.blend_method = 'CLIP'
     else:
         mat.blend_method = 'OPAQUE'
 

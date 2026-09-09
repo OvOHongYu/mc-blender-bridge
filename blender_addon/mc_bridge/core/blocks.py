@@ -62,17 +62,68 @@ AIR_ID = INDEX["minecraft:air"]
 WATER_ID = INDEX["minecraft:water"]
 
 
+def base_name(name):
+    """去掉方块状态属性后缀: 'minecraft:oak_stairs[facing=east]' -> 'minecraft:oak_stairs'。"""
+    i = name.find("[")
+    return name[:i] if i >= 0 else name
+
+
+def props_of(name):
+    """解析属性后缀 -> dict；无属性返回 {}。"""
+    i = name.find("[")
+    if i < 0 or not name.endswith("]"):
+        return {}
+    out = {}
+    for part in name[i + 1:-1].split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k] = v
+    return out
+
+
 def block_info(name):
-    gid = INDEX[name]
+    gid = INDEX[base_name(name)]
     return gid, int(CLASS[gid]), TINT[gid], COLOR[gid]
+
+
+def tint_of(name):
+    """方块染色（无则 None）。"""
+    gid = INDEX.get(base_name(name))
+    return TINT[gid] if gid is not None else None
+
+
+# 平原群系默认染色（0x91BD59 草 / 0x77AB2F 叶 / 0x3F76E4 水）
+TINT_GRASS = (0.568, 0.741, 0.349)
+TINT_FOLIAGE = (0.467, 0.671, 0.184)
+TINT_WATER = (0.247, 0.463, 0.894)
+
+
+def default_tint(name):
+    """默认染色：共享表优先，其次按名字启发式（资产包声明该面染色时用）。"""
+    base = base_name(name)
+    gid = INDEX.get(base)
+    if gid is not None and TINT[gid]:
+        return TINT[gid]
+    low = base.lower()
+    if "water" in low:
+        return TINT_WATER
+    if ("leaves" in low or "vine" in low or "fern" in low
+            or "azalea" in low or "roots" in low):
+        return TINT_FOLIAGE
+    if ("grass" in low or "lily" in low or "sapling" in low or "plant" in low
+            or "crop" in low or "wheat" in low or "flower" in low
+            or "cactus" in low or "sugar_cane" in low or "moss" in low):
+        return TINT_GRASS
+    return (1.0, 1.0, 1.0)
 
 
 def texture_name(name, face):
     """face ∈ top/side/bottom -> 贴图名（供 /api/texture 使用）。"""
-    gid = INDEX[name]
+    base = base_name(name)
+    gid = INDEX[base]
     faces = _ENTRIES[gid][4]
     if faces is None:
-        return name.split(":")[-1]
+        return base.split(":")[-1]
     idx = {"top": 0, "side": 1, "bottom": 2}[face]
     return faces[idx]
 

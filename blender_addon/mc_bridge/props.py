@@ -9,6 +9,8 @@ _defaults = {
     "host": "127.0.0.1",
     "port": 8788,
     "save_dir": "",
+    "assets_path": "",
+    "use_models": True,
     "auto_bind_camera": True,
     "dim": "minecraft:overworld",
     "r_load": 8,
@@ -43,6 +45,13 @@ class MCB_Properties(bpy.types.PropertyGroup):
     save_dir: bpy.props.StringProperty(name="存档目录", default=_defaults["save_dir"],
                                        subtype='DIR_PATH',
                                        description="Minecraft 存档根目录（含 region/ 与 level.dat）")
+    assets_path: bpy.props.StringProperty(name="资产包", default=_defaults["assets_path"],
+                                         subtype='FILE_PATH',
+                                         description="MCBA1 资产包（tools/bake_assets.py 生成）；"
+                                                     "提供后使用原版贴图与烘焙模型")
+    use_models: bpy.props.BoolProperty(name="烘焙模型", default=_defaults["use_models"],
+                                       description="LOD0 近处区块用资产包模型（楼梯/栅栏真实形状）。"
+                                                   "关闭后控制模式全部走服务端网格，加载更快但非完整方块近似为立方体")
     auto_bind_camera: bpy.props.BoolProperty(name="相机自动挂载", default=_defaults["auto_bind_camera"],
                                              description="连接时把当前场景相机设为 MCB_Root 的子物体，"
                                                          "整体变换时区块与相机同步移动")

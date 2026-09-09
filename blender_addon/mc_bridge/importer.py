@@ -98,22 +98,24 @@ def _build_mesh(name, geo):
         uv.data.foreach_set("uv", np.ascontiguousarray(geo["uv"], np.float32).ravel())
     col = mesh.color_attributes.new("Col", 'BYTE_COLOR', 'CORNER')
     if col is not None and nq:
-        col.data.foreach_set("color", np.ascontiguousarray(geo["vcol"], np.uint8).ravel())
+        # color 为浮点 0..1；直接写 uint8 会被钳制为白色（丢失 AO/染色）
+        col.data.foreach_set(
+            "color", (np.ascontiguousarray(geo["vcol"], np.float32) / 255.0).ravel())
     mesh.validate()
     mesh.update()
     return mesh
 
 
 def create_or_replace(key, payload, mats_resolver):
-    """mats_resolver(block, facegrp) -> Material 或 None（材质尚未就绪）。"""
+    """mats_resolver(desc) -> Material；desc 见 mesher.geo_from_arrays。"""
     name = obj_name(key)
     old = bpy.data.objects.get(name)
     if old is not None:
         _delete_object(old)
     geo = payload["geo"]
     mesh = _build_mesh(name, geo)
-    for block, facegrp in geo["mats"]:
-        mesh.materials.append(mats_resolver(block, facegrp))
+    for desc in geo["mats"]:
+        mesh.materials.append(mats_resolver(desc))
     obj = bpy.data.objects.new(name, mesh)
     dim, cx, cz = key
     # 根物体局部坐标（MC 世界坐标）：Z-up: X=MC x, Y=-MC z, Z=MC y(高度)

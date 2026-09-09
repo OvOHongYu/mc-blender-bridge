@@ -21,6 +21,7 @@ from . import blocks as B
 
 AO_CURVE = (0.45, 0.65, 0.85, 1.0)
 DIRS = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
+DIR_VEC = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
 # 轴 d 上，升序 (u,v) 角点顺序给出的法向: d=0 -> +X, d=1 -> -Y, d=2 -> +Z
 _FLIP_POS = (False, True, False)
@@ -119,11 +120,16 @@ def _corner_ao(occl):
     return [a0, a1, a2, a3]
 
 
-def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None):
-    """返回 quads: list[(verts int16 (4,3), dir u8, block u16, ao u8×4)]。
+def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
+                palette=None, pack=None):
+    """返回 (quads, models)。
+
+    quads: list[(verts int16 (4,3), dir u8, block u16, ao u8×4)]（完整方块面）。
+    models: list[(verts int16 (4,3), dir, tex u16, tint i8, cull u8, uv f32(4,2),
+                  block u16, ao u8×4)]，顶点为 1/16 方块单位（烘焙模型几何）。
 
     cross: 按 gid 的 bool 数组（True = 交叉面片植物）。
-    若为 None，则所有 CUTOUT 按原样处理（旧模式）。
+    pack:  AssetPack；提供时对 class5 方块用烘焙模型替代完整方块近似。
     """
     if leaves_fast:
         if cross is None:
@@ -133,6 +139,18 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None):
             cls = np.where((cls == B.CUTOUT) & ~cross_cell, B.OPAQUE,
                            cls).astype(np.uint8)
     quads = []
+    modeled = {}
+    if pack is not None and palette is not None:
+        for gi, ent in enumerate(palette):
+            ecls = int(ent[0])
+            if ecls == B.AIR or ecls == B.OPAQUE:
+                continue        # 整立方体（含草方块等带叠加层）走贪心路径
+            base = B.base_name(ent[1])
+            if not pack.use_model(base):
+                continue
+            vis = pack.variant_indices(base, B.props_of(ent[1]))
+            if vis:
+                modeled[gi] = vis
     for d in range(3):
         C = np.moveaxis(cls, d, 0)
         G = np.moveaxis(gid, d, 0)
@@ -206,6 +224,8 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None):
     if cross is not None:
         cross_cell = np.asarray(cross)[gid]
         mask = (cls != 0) & cross_cell
+        if modeled:                       # 已注入模型的方块不再叠加交叉面片
+            mask &= ~np.isin(gid, np.array(sorted(modeled), np.uint16))
         mask[0, :, :] = mask[-1, :, :] = False
         mask[:, 0, :] = mask[:, -1, :] = False
         mask[:, :, 0] = mask[:, :, -1] = False
@@ -223,10 +243,35 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None):
                     quads.append((flat, 0, g, (3, 3, 3, 3)))
 
     # 一次性把 (12-int tuple) 顶点转为 numpy 视图（下游接口不变）
+    if modeled:
+        quads = [q for q in quads if q[2] not in modeled]
     if quads:
         va = np.array([q[0] for q in quads], np.int16).reshape(-1, 4, 3)
         quads = [(va[i], q[1], q[2], q[3]) for i, q in enumerate(quads)]
-    return quads
+    models = _emit_models(cls, gid, modeled, pack) if modeled else []
+    return quads, models
+
+
+def _emit_models(cls, gid, modeled, pack):
+    """对 modeled 调色板索引的格子发射烘焙模型几何（1/16 方块单位）。"""
+    ids = np.array(sorted(modeled), np.uint16)
+    mask = np.isin(gid, ids)
+    mask[0, :, :] = mask[-1, :, :] = False
+    mask[:, 0, :] = mask[:, -1, :] = False
+    mask[:, :, 0] = mask[:, :, -1] = False
+    out = []
+    for x, y, z in zip(*np.nonzero(mask)):
+        gi = int(gid[x, y, z])
+        ox, oy, oz = (int(x) - 1) * 16, (int(y) - 1) * 16, (int(z) - 1) * 16
+        for vi in modeled[gi]:
+            for verts, d, tex, tint, cull, uv in pack.variants[vi]:
+                if cull:
+                    dv = DIR_VEC[cull - 1]
+                    if cls[x + dv[0], y + dv[1], z + dv[2]] == B.OPAQUE:
+                        continue
+                wv = tuple((ox + v[0], oy + v[1], oz + v[2]) for v in verts)
+                out.append((wv, d, tex, tint, cull, uv, gi, (3, 3, 3, 3)))
+    return out
 
 
 def _emit(quads, blk, p, u0, v0, w, h, d, positive, ao, i_col, with_ao):
@@ -328,59 +373,256 @@ def _emit_flat(quads, blk, p, u0, v0, w, h, d, positive):
 
 # ------------------------------------------------------- 几何装配(BI 数据) ----
 
-def geo_from_arrays(verts, dirs, blocks_, aos, palette):
-    """(nq,4,3)i16 + dirs + blocks + aos + palette -> 导入器几何字典。"""
+def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None):
+    """完整方块数组 + 可选烘焙模型 -> 导入器几何字典。
+
+    mats 为材质描述符列表:
+      ("block", 方块名, facegrp) —— 完整方块按面组取贴图
+      ("tex",   texId)          —— 烘焙模型按贴图 id 取贴图
+    """
     from . import blocks as B
     nq = verts.shape[0]
-    if nq == 0:
+    nm = len(models) if models else 0
+    if nq == 0 and nm == 0:
         return {"nq": 0, "verts": np.zeros((0, 3), np.float32),
                 "uv": np.zeros((0, 2), np.float32), "vcol": np.zeros((0, 4), np.uint8),
                 "mat_idx": np.zeros(0, np.uint16), "mats": [], "tris": 0}
-    vf = verts.astype(np.float32)
-    # UV 规则: ±X -> (z,y); ±Y -> (x,z); ±Z -> (x,y)
-    d = dirs // 2
-    uv = np.zeros((nq, 4, 2), np.float32)
-    mx = (d == 0)
-    uv[mx] = vf[mx][:, :, [2, 1]]
-    my = (d == 1)
-    uv[my] = vf[my][:, :, [0, 2]]
-    mz = (d == 2)
-    uv[mz] = vf[mz][:, :, [0, 1]]
 
-    # vcol: tint * AO（tint 表按 palette 索引预取，向量化）
-    shade = np.take(np.array(AO_CURVE, np.float32), aos)      # (nq,4)
-    tints = np.ones((len(palette), 3), np.float32)
-    for i, name in enumerate(palette):
-        g = B.INDEX.get(name)
-        if g is not None and B.TINT[g]:
-            tints[i] = B.TINT[g]
-    rgb = tints[blocks_][:, None, :]                          # (nq,1,3)
-    vcol = np.empty((nq, 4, 4), np.uint8)
-    vcol[:, :, :3] = np.clip(rgb * shade[:, :, None] * 255.0, 0, 255).astype(np.uint8)
-    vcol[:, :, 3] = 255
+    parts = []          # (verts, uv, vcol, inv, mats)
+    if nq:
+        vf = verts.astype(np.float32)
+        # UV 规则: ±X -> (z,y); ±Y -> (x,z); ±Z -> (x,y)
+        d = dirs // 2
+        uv = np.zeros((nq, 4, 2), np.float32)
+        mx = (d == 0)
+        uv[mx] = vf[mx][:, :, [2, 1]]
+        my = (d == 1)
+        uv[my] = vf[my][:, :, [0, 2]]
+        mz = (d == 2)
+        uv[mz] = vf[mz][:, :, [0, 1]]
 
-    # 材质槽: (name, facegrp) —— 组合键向量化求 unique
-    facegrp = np.where(dirs == 2, 0, np.where(dirs == 3, 1, 2)).astype(np.uint8)  # 0 top 1 bottom 2 side
-    key = blocks_.astype(np.int32) * 4 + facegrp
-    uniq, inv = np.unique(key, return_inverse=True)
-    mats = [(palette[int(k) >> 2], ("top", "bottom", "side")[int(k) & 3]) for k in uniq]
-    mat_idx = inv.astype(np.uint16)
+        # vcol: tint * AO。资产包声明染色面时按面组分别染色，否则沿用方块整体染色。
+        shade = np.take(np.array(AO_CURVE, np.float32), aos)      # (nq,4)
+        facegrp = np.where(dirs == 2, 0, np.where(dirs == 3, 1, 2)).astype(np.uint8)
+        if pack is None:
+            try:
+                from . import assets
+                pack = assets.current()
+            except Exception:
+                pack = None
+        tints = np.ones((len(palette), 3, 3), np.float32)         # [pal][facegrp][rgb]
+        for i, name in enumerate(palette):
+            mask = pack.tint_mask(B.base_name(name)) if pack is not None else None
+            for fg in range(3):
+                if mask is None:
+                    t = B.tint_of(name)
+                elif (mask >> fg) & 1:
+                    t = B.default_tint(name)
+                else:
+                    t = None
+                if t:
+                    tints[i, fg] = t
+        rgb = tints[blocks_, facegrp]                             # (nq,3)
+        vcol = np.empty((nq, 4, 4), np.uint8)
+        vcol[:, :, :3] = np.clip(rgb[:, None, :] * shade[:, :, None] * 255.0,
+                                 0, 255).astype(np.uint8)
+        vcol[:, :, 3] = 255
 
-    return {"nq": nq, "verts": vf.reshape(-1, 3), "uv": uv.reshape(-1, 2),
-            "vcol": vcol.reshape(-1, 4), "mat_idx": mat_idx, "mats": mats,
-            "tris": nq * 2}
+        # 材质槽: (name, facegrp) —— 组合键向量化求 unique
+        key = blocks_.astype(np.int32) * 4 + facegrp
+        uniq, inv = np.unique(key, return_inverse=True)
+        mats = [("block", palette[int(k) >> 2], ("top", "bottom", "side")[int(k) & 3])
+                for k in uniq]
+        parts.append((vf.reshape(-1, 3), uv.reshape(-1, 2), vcol.reshape(-1, 4),
+                      inv.astype(np.uint16), mats))
+
+    if nm:
+        mv = np.array([m[0] for m in models], np.float32).reshape(-1, 3) / 16.0
+        # UV 已在烘焙期按 texture_size 归一化并翻转为 Blender 约定
+        muv = np.array([m[5] for m in models], np.float32).reshape(-1, 2)
+        maos = np.array([m[7] for m in models], np.uint8).reshape(-1, 4)
+        mshade = np.take(np.array(AO_CURVE, np.float32), maos)
+        mtex = np.array([m[2] for m in models], np.int32)
+        mtint = np.array([m[3] for m in models], np.int8)
+        mblk = np.array([m[6] for m in models], np.uint16)
+        mcol = np.ones((nm, 3), np.float32)
+        for i, ti in enumerate(mtint):
+            if ti >= 0:
+                mcol[i] = B.default_tint(palette[mblk[i]])
+        vcol = np.empty((nm, 4, 4), np.uint8)
+        vcol[:, :, :3] = np.clip(mcol[:, None, :] * mshade[:, :, None] * 255.0,
+                                 0, 255).astype(np.uint8)
+        vcol[:, :, 3] = 255
+        uniq, inv = np.unique(mtex, return_inverse=True)
+        mats = [("tex", int(t)) for t in uniq]
+        parts.append((mv, muv, vcol.reshape(-1, 4), inv.astype(np.uint16), mats))
+
+    verts_all = np.concatenate([p[0] for p in parts])
+    uv_all = np.concatenate([p[1] for p in parts])
+    vcol_all = np.concatenate([p[2] for p in parts])
+    mats, idx_parts = [], []
+    for _v, _u, _c, inv, mm in parts:
+        base = len(mats)
+        mats.extend(mm)
+        idx_parts.append(inv + base)
+    mat_idx = np.concatenate(idx_parts).astype(np.uint16)
+    total = verts_all.shape[0] // 4
+    return {"nq": total, "verts": verts_all, "uv": uv_all,
+            "vcol": vcol_all, "mat_idx": mat_idx, "mats": mats,
+            "tris": total * 2}
 
 
-def mesh_payload(payloads, center=(0, 0), with_ao=True, leaves_fast=False):
-    """3×3 payload 字典 -> (quads, palette, y_bottom)。"""
+# ------------------------------------------------------------ 流体 ----
+# 类原版流体几何（对照 MC 1.21.1 FluidRenderer）：
+#   单列高度: 同种流体时「上方仍是同种流体 ? 1.0 : level/9」（水源 level=0 记 8/9）；
+#             非同种流体时固体忽略（-1）、其余按 0.0 参与平均。
+#   四角高度: 加权平均（高度 >= 0.8 权重 10，否则权重 1）；两个正交邻居任一
+#              >= 1.0 时直接取 1.0；对角邻居仅在正交邻居 > 0 时参与。
+# 仅本地网格路径（存档模式 / 模式 A）支持：服务端 MCM1 顶点是整型块坐标，
+# 表示不了流体高度，因此默认关闭（fluids=True 才启用）。
+_FLUID_SOLID = (B.OPAQUE, B.TRANSPARENT, B.NONCUBE)
+
+
+def _fluid_height(name):
+    """方块状态名 -> 单列流体高度（方块单位）。水源 level=0 -> 8/9。"""
+    lvl = 8
+    if "[level=" in name:
+        try:
+            v = int(name.split("[level=", 1)[1].split("]", 1)[0].split(",")[0])
+        except ValueError:
+            v = 0
+        lvl = 8 if v == 0 else max(1, min(8, v))
+    return lvl / 9.0
+
+
+def _fluid_quads(cls, gid, palette):
+    """液体方块的类原版几何；顶点为区块局部方块单位（可为小数）。
+
+    cls/gid 是 assemble_padded 的填充数组（y 维 = 区块层数 + 2 层边框），
+    因此层数 = shape[1] - 2，方块层位于 y 索引 1..H。"""
+    H = cls.shape[1] - 2
+    n = len(palette)
+    is_liq = np.zeros(n, bool)
+    is_solid = np.zeros(n, bool)
+    frac = np.zeros(n, np.float32)
+    base_id = np.zeros(n, np.int32)
+    base_of = {}
+    for i, (c, name) in enumerate(palette):
+        is_liq[i] = (c == B.LIQUID)
+        is_solid[i] = c in _FLUID_SOLID
+        frac[i] = _fluid_height(name)
+        b = B.base_name(name)
+        if b not in base_of:
+            base_of[b] = len(base_of)
+        base_id[i] = base_of[b]
+
+    liq = is_liq[gid]
+    if not liq.any():
+        return []
+    bid = base_id[gid]
+    sol = is_solid[gid]
+    above_same = np.zeros_like(liq)
+    above_same[:, :-1, :] = (liq[:, 1:, :] & liq[:, :-1, :]
+                             & (bid[:, 1:, :] == bid[:, :-1, :]))
+    h = np.where(liq, np.where(above_same, 1.0, frac[gid]),
+                 np.where(sol, -1.0, 0.0)).astype(np.float32)
+
+    own = h[1:17, 1:H + 1, 1:17]
+    corners = {}
+    for dx, dz in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+        ax = h[1 + dx:17 + dx, 1:H + 1, 1:17]
+        bz = h[1:17, 1:H + 1, 1 + dz:17 + dz]
+        dg = h[1 + dx:17 + dx, 1:H + 1, 1 + dz:17 + dz]
+        big = (ax >= 1.0) | (bz >= 1.0)
+        diag_ok = (ax > 0.0) | (bz > 0.0)
+        s = np.zeros_like(own)
+        w = np.zeros_like(own)
+        for v, inc in ((own, None), (ax, None), (bz, None), (dg, diag_ok)):
+            heavy = v >= 0.8
+            c = np.where(heavy, v * 10.0, np.where(v >= 0.0, v, 0.0))
+            wt = np.where(heavy, 10.0, np.where(v >= 0.0, 1.0, 0.0))
+            if inc is not None:
+                c = np.where(inc, c, 0.0)
+                wt = np.where(inc, wt, 0.0)
+            s = s + c
+            w = w + wt
+        corners[(dx, dz)] = np.where(big | (diag_ok & (dg >= 1.0)), 1.0,
+                                     s / np.maximum(w, 1e-6))
+
+    opa = (cls == B.OPAQUE)
+    liq_c = liq[1:17, 1:H + 1, 1:17]
+    out = []
+
+    def _blk(i, j, k):
+        return int(gid[1 + i, 1 + j, 1 + k])
+
+    def _corners(i, j, k):
+        return (float(corners[(-1, -1)][i, j, k]), float(corners[(-1, 1)][i, j, k]),
+                float(corners[(1, 1)][i, j, k]), float(corners[(1, -1)][i, j, k]))
+
+    # 顶面：上方不是同种流体且未被不透明方块遮挡
+    top = liq_c & ~above_same[1:17, 1:H + 1, 1:17] & ~opa[1:17, 2:H + 2, 1:17]
+    for i, j, k in zip(*np.nonzero(top)):
+        X, Y, Z = int(i), int(j), int(k)
+        c00, c01, c11, c10 = _corners(i, j, k)
+        out.append((((X, Y + c00, Z), (X, Y + c01, Z + 1),
+                     (X + 1, Y + c11, Z + 1), (X + 1, Y + c10, Z)),
+                    2, _blk(i, j, k), (3, 3, 3, 3)))
+
+    # 底面：下方不是同种流体且未被遮挡
+    below_same = np.zeros_like(liq)
+    below_same[:, 1:, :] = (liq[:, :-1, :] & liq[:, 1:, :]
+                            & (bid[:, :-1, :] == bid[:, 1:, :]))
+    bot = liq_c & ~below_same[1:17, 1:H + 1, 1:17] & ~opa[1:17, 0:H, 1:17]
+    for i, j, k in zip(*np.nonzero(bot)):
+        X, Y, Z = int(i), int(j), int(k)
+        out.append((((X, Y, Z), (X + 1, Y, Z), (X + 1, Y, Z + 1), (X, Y, Z + 1)),
+                    3, _blk(i, j, k), (3, 3, 3, 3)))
+
+    # 四个侧面：邻居不是同种流体且未被遮挡（顶边沿该侧两个角高度）
+    for sx, sz in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        nb = (slice(1 + sx, 17 + sx), slice(1, H + 1), slice(1 + sz, 17 + sz))
+        nb_same = liq[nb] & (bid[nb] == bid[1:17, 1:H + 1, 1:17])
+        mask = liq_c & ~nb_same & ~opa[nb]
+        for i, j, k in zip(*np.nonzero(mask)):
+            X, Y, Z = int(i), int(j), int(k)
+            c00, c01, c11, c10 = _corners(i, j, k)
+            if sx < 0:
+                v = ((X, Y, Z), (X, Y, Z + 1), (X, Y + c01, Z + 1), (X, Y + c00, Z))
+                d = 1
+            elif sx > 0:
+                v = ((X + 1, Y, Z + 1), (X + 1, Y, Z),
+                     (X + 1, Y + c10, Z), (X + 1, Y + c11, Z + 1))
+                d = 0
+            elif sz < 0:
+                v = ((X, Y, Z), (X, Y + c00, Z), (X + 1, Y + c10, Z), (X + 1, Y, Z))
+                d = 5
+            else:
+                v = ((X, Y, Z + 1), (X + 1, Y, Z + 1),
+                     (X + 1, Y + c11, Z + 1), (X, Y + c01, Z + 1))
+                d = 4
+            out.append((v, d, _blk(i, j, k), (3, 3, 3, 3)))
+    return out
+
+
+def mesh_payload(payloads, center=(0, 0), with_ao=True, leaves_fast=False,
+                 pack=None, fluids=False):
+    """3×3 payload 字典 -> (quads, palette, y_bottom, models)。
+
+    fluids=True 时把液体的整方块面换成类原版流体几何（见上）。"""
     cls, gid, H, pal = assemble_padded(payloads, center)
     # 交叉面片: CUTOUT 且非树叶（与 Java 侧 BlockClassifier 规则一致）
     cross = np.zeros(len(pal), bool)
     for i, (c, name) in enumerate(pal):
         cross[i] = (c == B.CUTOUT) and ("leaves" not in name)
-    quads = mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast,
-                        cross=cross)
-    return quads, pal, None
+    quads, models = mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast,
+                                cross=cross, palette=pal, pack=pack)
+    if fluids:
+        liq_ids = {i for i, (c, _) in enumerate(pal) if c == B.LIQUID}
+        if liq_ids:
+            quads = [q for q in quads if int(q[2]) not in liq_ids]
+            quads.extend(_fluid_quads(cls, gid, pal))
+    return quads, pal, None, models
 
 
 def shell_payload(payloads, center=(0, 0)):
@@ -390,7 +632,7 @@ def shell_payload(payloads, center=(0, 0)):
     cx_ = np.transpose(cls, (2, 0, 1))
     gx_ = np.transpose(gid, (2, 0, 1))
     quads = shell_lod(cx_, gx_)
-    return quads, pal, None
+    return quads, pal, None, []
 
 
 # 延迟导入避免循环

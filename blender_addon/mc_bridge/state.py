@@ -48,3 +48,17 @@ def clear():
     with _lock:
         _client = _scheduler = _info = _blocks = None
         _timer_on = _frame_hook_on = False
+
+
+def ensure_assets(p):
+    """按 p.assets_path 加载 MCBA1 资产包（同路径已加载则跳过）。"""
+    from .core import assets
+    pth = getattr(p, "assets_path", "") or ""
+    if not pth:
+        return assets.current()
+    if assets.current() is not None and assets.path() == pth:
+        return assets.current()
+    try:
+        return assets.load_global(pth)
+    except Exception:
+        return assets.current()

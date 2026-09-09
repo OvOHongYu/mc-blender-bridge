@@ -1,4 +1,4 @@
-﻿# mc-blender-bridge
+# mc-blender-bridge
 
 让 Blender 借助**本地运行的 Minecraft Java 版实例**或**直接读取存档文件**，
 按相机位置**动态加载/卸载区块**，并在数据链路中完成**面剔除、贪心合并、
@@ -41,6 +41,42 @@ AO 烘焙与 LOD 降级**的桥接系统。
 - 加载判定使用**相机相对根物体的位置**，根物体自身变换不触发装卸；
 - 连接时自动把场景相机挂到根节点（可关），也可手动执行「绑定相机到根节点」。
 
+## 原版资产包（贴图 / 模型烘焙）
+
+装一次资产包，即可获得**原版贴图**与**真实模型形状**（楼梯阶梯、栅栏十字、
+门/活板门、玻璃板…），控制模式与存档模式通用：
+
+```bash
+pip install pillow   # 仅烘焙工具需要
+python tools/bake_assets.py "<客户端 jar 或资源包 zip>" "mods/*.jar" -o dist/assets.mcba --mc-version 1.21.1
+# 客户端 jar 示例：.minecraft/versions/1.21.1-Fabric_0.17.2/1.21.1-Fabric_0.17.2.jar
+# 模组方块：把 mods/*.jar 一并作为输入即可（自动扫描各命名空间）
+#   PowerShell / cmd 不会替原生命令展开 *，加引号交给脚本展开即可（如上）
+```
+
+N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
+
+- 贴图优先级：**资产包 > 服务端 `/api/texture` > 程序化色块**；
+- 顶点色 = 逐面染色（草顶染绿等）× AO；
+- 非整立方体方块按 `facing/half/shape` 等状态注入烘焙模型几何（真实 UV + cullface）；
+- 控制模式 LOD0（近处）自动走本地网格以注入模型，LOD1/2 仍用服务端网格保吞吐；
+  「烘焙模型」开关可关闭。
+
+> 方块实体（箱子/床/告示牌/旗帜/潜影盒/头颅/装饰陶罐/传送门框架/钟等）没有
+> JSON 几何（由 Java 渲染器绘制），改用**从客户端 jar 提取的原版模型**：
+> `tools/dump_be_models.ps1` 直接调用原版模型工厂导出顶点/UV/面法线
+> （`tools/vanilla_be_models.json`），烘焙时再套用原版渲染器的矩阵变换
+> （朝向/贴图/部件显隐），因此几何与原版逐顶点一致。
+>
+> 重新提取（换 MC 版本或首次克隆后缺失该 JSON 时）：
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File tools/dump_be_models.ps1
+> ```
+> 需要 JDK（`JAVA_HOME`）与 loom 缓存中的客户端 jar；未收录的方块（含模组方块
+> 实体）自动退回简化代理模型。
+
+![资产包渲染预览（真实贴图 + 楼梯/栅栏/门模型）](docs/img/r2_preview.png)
+
 ## 仓库结构
 
 | 目录 | 内容 | 状态 |
@@ -48,9 +84,9 @@ AO 烘焙与 LOD 降级**的桥接系统。
 | `blender_addon/mc_bridge/` | Blender 插件（bpy 层 + 纯 Python 核心） | ✅ 已实现并测试 |
 | `server_sim/` | MC 模拟服务器（无 MC 环境的开发/测试替身，与模组 API 同构） | ✅ 已实现并测试 |
 | `mcmod/` | Fabric 服务端模组（Java） | ✅ 源码完整；纯 Java 部分已与 Python 逐字节对拍 |
-| `tests/` | 53 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
+| `tests/` | 61 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
 | `docs/` | 设计方案 / 协议规范 / 用户手册 / 路线图 / 预览图 | ✅ |
-| `tools/` | 夹具生成、预览导出、Java 合并验证脚本 | ✅ |
+| `tools/` | 资产烘焙、夹具生成、预览导出、Java 合并验证脚本 | ✅ |
 
 ## 快速开始（无 Minecraft，30 秒体验）
 
@@ -135,15 +171,20 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
 
 ## 当前限制
 
-- 非完整方块（楼梯/栅栏等，class5）以完整方块近似；v2 计划从客户端烘焙真实模型。
+- 资产包覆盖**所有传入 jar 的命名空间**（原版 + 模组）：把 `mods/*.jar`
+  一并烘焙即可获得模组方块的真实贴图与 JSON 模型；未传入的模组方块仍回退为
+  完整方块近似。动态 BlockState/BakedModel（代码模型，非 JSON）同样回退近似。
+- 无资产包时非完整方块（楼梯/栅栏等）按完整方块近似，贴图为程序化色块。
+- 流体（水/岩浆）在**本地网格路径**（存档模式、`mode=raw`）按原版方式渲染：
+  水面高度 = `level/9`（水源 8/9）、四角按邻居高度平滑、同类流体互不生成面；
+  走服务端网格（`mode=mesh`，MCM1 整型块坐标）时仍为整方块。
 - 实体/方块实体不在范围内。
 - 存档模式只读（不能像控制模式那样把玩家传送到相机位置）；
   自定义数据包维度需手动适配 ymin/height。
 - MC 模组按 Yarn 1.20.1 编写： Mixin 注入失败不影响启动（版本追踪退化为不可用）；
   其他 MC 版本需调整映射。
-- 贴图：控制模式下服务端支持 `mcbridge/textures/` 手工放置 PNG，
-  否则程序化色块；存档模式使用内置程序化贴图。
 
 ## 未来规划
 
-见 [docs/roadmap.md](docs/roadmap.md)（高度轴分区块、原版/模组材质与模型烘焙等）。
+见 [docs/roadmap.md](docs/roadmap.md)（R1 高度轴分区块、R3 模组资产烘焙、
+R4 跨区块合并、R5 实体、R6 渲染增强、R7 生态）。

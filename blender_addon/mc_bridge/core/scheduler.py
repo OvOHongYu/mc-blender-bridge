@@ -29,6 +29,7 @@ class Params:
         self.ymin = kw.get("ymin", -64)
         self.ymax = kw.get("ymax", 320)
         self.mode = kw.get("mode", "mesh")           # mesh=模式B / raw=模式A
+        self.use_models = kw.get("use_models", True)  # LOD0 用资产包烘焙模型
         self.leaves_fast = kw.get("leaves_fast", False)
         self.inflight = kw.get("inflight", 3)
         self.store_cap = kw.get("store_cap", 256)
@@ -240,15 +241,27 @@ class Scheduler:
             self.log("fetch error", key, e)
 
     def _fetch_geo(self, dim, cx, cz, lod):
-        if self.p.mode == "raw" and lod < 2:
+        # LOD0 且已加载资产包时走本地网格：只有本地网格路径能注入烘焙模型
+        # （近处楼梯/栅栏需要真实几何）；远处 LOD1/2 仍用服务端网格保吞吐。
+        if lod < 2 and (self.p.mode == "raw"
+                        or (lod == 0 and self._models_on())):
             return self._fetch_geo_raw(dim, cx, cz, lod)
         m = self.client.mesh(dim, cx, cz, self.p.ymin, self.p.ymax,
                              lod=lod, ao=(lod == 0),
                              leaves=("fast" if self.p.leaves_fast else "fancy"))
         from .codec import decode_mcm1  # noqa: F401
         from .mesher import geo_from_arrays
+        from . import assets
         return geo_from_arrays(m["verts"], m["dirs"], m["blocks"], m["aos"],
-                               [n for _, n in m["palette"]])
+                               [n for _, n in m["palette"]],
+                               models=m.get("models"), pack=assets.current())
+
+    def _models_on(self):
+        if not self.p.use_models:
+            return False
+        from . import assets
+        pack = assets.current()
+        return pack is not None and bool(pack.blockstates)
 
     def _fetch_geo_raw(self, dim, cx, cz, lod):
         payloads = {}
@@ -258,15 +271,20 @@ class Scheduler:
                 payloads[(dx, dz)] = self.store.get_or_fetch(
                     nkey, lambda k=nkey: self.client.chunk(
                         k[0], k[1], k[2], self.p.ymin, self.p.ymax))
-        quads, pal, _ = mesher.mesh_payload(
-            payloads, with_ao=(lod == 0), leaves_fast=self.p.leaves_fast)
+        from . import assets
+        quads, pal, _, models = mesher.mesh_payload(
+            payloads, with_ao=(lod == 0), leaves_fast=self.p.leaves_fast,
+            pack=assets.current(), fluids=True)
         import numpy as np
-        verts = np.array([q[0] for q in quads], np.int16) if quads else np.zeros((0, 4, 3), np.int16)
+        # 流体几何顶点是小数块坐标 -> 用 float32（整型会截断水面高度）
+        verts = np.array([q[0] for q in quads], np.float32) if quads \
+            else np.zeros((0, 4, 3), np.float32)
         dirs = np.array([q[1] for q in quads], np.uint8)
         blks = np.array([q[2] for q in quads], np.uint16)
         aos = np.array([q[3] for q in quads], np.uint8).reshape(-1, 4)
         from .mesher import geo_from_arrays
-        return geo_from_arrays(verts, dirs, blks, aos, [n for _, n in pal])
+        return geo_from_arrays(verts, dirs, blks, aos, [n for _, n in pal],
+                               models=models, pack=assets.current())
 
     # ------------------------------------------------------------ 应用 ----
     def poll_apply(self, max_n=2):

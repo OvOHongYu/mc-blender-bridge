@@ -42,7 +42,7 @@ def region_quads(client, cx0, cz0, cx1, cz1, ymin, ymax):
                 for dz in (-1, 0, 1):
                     payloads[(dx, dz)] = client.chunk(
                         "overworld", cx + dx, cz + dz, ymin, ymax)
-            quads, pal, _ = mesher.mesh_payload(payloads, with_ao=True)
+            quads, pal, _, _ = mesher.mesh_payload(payloads, with_ao=True)
             name_of = {i: n for i, (c, n) in enumerate(pal)}
             ox, oz = (cx - cx0) * 16, (cz - cz0) * 16
             for v, d, b, ao in quads:

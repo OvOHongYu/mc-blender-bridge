@@ -6,11 +6,11 @@
 bl_info = {
     "name": "MC Bridge 动态区块",
     "author": "zcube",
-    "version": (1, 0, 0),
+    "version": (1, 2, 1),
     "blender": (3, 6, 0),
     "location": "3D 视口 N 面板 > MC Bridge",
-    "description": "借助本地 MC(Fabric 模组)实例，按相机位置动态加载/卸载区块，"
-                   "带面剔除、贪心合并、AO 与 LOD 减面",
+    "description": "借助本地 MC(Fabric 模组)实例或存档文件，按相机位置动态加载/卸载区块，"
+                   "带面剔除、贪心合并、AO 与 LOD 减面；支持原版资产包（贴图/模型烘焙）",
     "category": "Import-Export",
 }
 

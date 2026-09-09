@@ -61,6 +61,13 @@ class MCB_PT_panel(bpy.types.Panel):
         row.prop(p, "apply_per_tick")
 
         box = lay.box()
+        box.label(text="资产包（原版贴图 / 模型）")
+        row = box.row(align=True)
+        row.prop(p, "assets_path", text="")
+        row.operator("mcb.load_assets", text="", icon='FILE_IMAGE')
+        box.prop(p, "use_models")
+
+        box = lay.box()
         box.label(text="渲染 / 交付")
         row = box.row()
         row.operator("mcb.prewarm", icon='RENDER_ANIMATION')

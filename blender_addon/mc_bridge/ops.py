@@ -12,6 +12,7 @@ from .core.scheduler import Params, Scheduler
 
 def connect(p):
     """p: MCB_Properties。返回 (ok, message)。存档模式走独立数据源。"""
+    state.ensure_assets(p)
     if getattr(p, "load_mode", "control") == "save":
         return opssave.connect_save(p)
     client = ApiClient(p.host, p.port)
@@ -25,6 +26,7 @@ def connect(p):
         lod1_dist=p.lod1_dist, lod2_dist=p.lod2_dist,
         ymin=p.ymin, ymax=p.ymax, mode=p.mode,
         leaves_fast=(p.leaves == "fast"), inflight=p.inflight,
+        use_models=getattr(p, "use_models", True),
         version_interval=p.version_poll))
     state.set_runtime(client, scheduler, info, blocks)
     p.status = "已连接 %s (MC %s)" % (info.get("mod", "?"), info.get("mcVersion", "?"))
@@ -113,7 +115,7 @@ def importer_apply(scheduler, limit):
                 return _c.texture_png(block, facegrp)
         importer.create_or_replace(
             key, payload,
-            lambda block, facegrp: mats.get_material(block, facegrp, tex_fetcher))
+            lambda desc: mats.get_material_for(desc, tex_fetcher))
         scheduler.stats["tris"] += payload["geo"]["tris"]
         n += 1
     return n
@@ -333,6 +335,38 @@ class MCB_OT_pick_save_dir(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
 
+class MCB_OT_load_assets(bpy.types.Operator):
+    bl_idname = "mcb.load_assets"
+    bl_label = "加载资产包"
+    bl_description = "加载 MCBA1 资产包（原版贴图 + 烘焙模型，由 tools/bake_assets.py 生成）"
+
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH')
+
+    def execute(self, context):
+        from .core import assets
+        p = context.scene.mcb
+        path = self.filepath or p.assets_path
+        if not path:
+            self.report({'ERROR'}, "请选择 .mcba 资产包")
+            return {'CANCELLED'}
+        try:
+            pack = assets.load_global(path)
+        except Exception as e:
+            self.report({'ERROR'}, "加载失败: %s" % e)
+            return {'CANCELLED'}
+        p.assets_path = path
+        mats.reset()
+        self.report({'INFO'}, "已加载 %d 方块 / %d 贴图 / %d 模型变体" % (
+            len(pack.blockstates), len(pack.tex_names), len(pack.variants)))
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        if context.scene.mcb.assets_path:
+            self.filepath = context.scene.mcb.assets_path
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+
 # ------------------------------------------------------------- 定时器 ----
 
 def _timer():
@@ -370,4 +404,5 @@ def unregister_handlers():
 
 CLASSES = (MCB_OT_connect, MCB_OT_disconnect, MCB_OT_unload_all,
            MCB_OT_use_selected_as_anchor, MCB_OT_prewarm, MCB_OT_bake,
-           MCB_OT_refresh, MCB_OT_bind_camera, MCB_OT_pick_save_dir)
+           MCB_OT_refresh, MCB_OT_bind_camera, MCB_OT_pick_save_dir,
+           MCB_OT_load_assets)

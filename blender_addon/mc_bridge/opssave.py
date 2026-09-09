@@ -28,6 +28,7 @@ def _remember(client, world):
 
 def connect_save(p):
     """p: MCB_Properties（load_mode=save）。返回 (ok, message)。"""
+    state.ensure_assets(p)
     save_dir = getattr(p, "save_dir", "") or os.getcwd()
     if not os.path.isdir(save_dir):
         return False, "存档目录不存在: %s" % save_dir
@@ -44,6 +45,7 @@ def connect_save(p):
         lod1_dist=p.lod1_dist, lod2_dist=p.lod2_dist,
         ymin=p.ymin, ymax=p.ymax, mode="raw",
         leaves_fast=(p.leaves == "fast"), inflight=p.inflight,
+        use_models=getattr(p, "use_models", True),
         version_interval=p.version_poll))
     state.set_runtime(client, scheduler,
                       client.ping(), client.blocks())

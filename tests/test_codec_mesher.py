@@ -127,7 +127,8 @@ def mesh_single(idx3, with_ao=True, leaves_fast=False):
     p = make_payload(secs=[(pal, idx)])
     payloads = {(0, 0): p}
     cls, gid, H, pal_out = mesher.assemble_padded(payloads)
-    return mesher.mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast), pal_out
+    quads, _ = mesher.mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast)
+    return quads, pal_out
 
 
 def quad_face(verts, d):
@@ -249,8 +250,9 @@ class TestMesher(unittest.TestCase):
         self.assertEqual(geo["uv"].shape, (len(quads) * 4, 2))
         self.assertEqual(geo["vcol"].shape, (len(quads) * 4, 4))
         self.assertEqual(geo["tris"], len(quads) * 2)
-        # 石头无 tint: vcol 灰度仅来自 AO
-        self.assertIn("minecraft:stone", geo["mats"][0][0])
+        # 石头无 tint: vcol 灰度仅来自 AO；材质描述符 = ("block", 名, 面组)
+        self.assertEqual(geo["mats"][0][0], "block")
+        self.assertIn("minecraft:stone", geo["mats"][0][1])
 
     def test_geo_tint(self):
         quads, pal = mesh_single({(0, 0, 0): "minecraft:oak_leaves"})
@@ -262,6 +264,112 @@ class TestMesher(unittest.TestCase):
         g = geo["vcol"][:, 1].astype(float)  # G 通道
         r = geo["vcol"][:, 0].astype(float)
         self.assertGreater(g.max(), r.max())  # 叶子绿色 tint
+
+
+# ------------------------------------------------------------ 流体几何 ----
+
+def fluid_block_idx(cells):
+    """{(x,y,z): 状态名} -> (palette, 4096 索引)；class 按 base 名查共享表。"""
+    names = ["minecraft:air"] + sorted(set(cells.values()))
+    pal = []
+    for n in names:
+        b = B.base_name(n)
+        cls = int(B.CLASS[B.INDEX[b]]) if b in B.INDEX else 1
+        pal.append((cls, n))
+    pmap = {n: i for i, (c, n) in enumerate(pal)}
+    arr = np.zeros(4096, np.uint16)
+    for (x, y, z), n in cells.items():
+        arr[(y << 8) | (z << 4) | x] = pmap[n]
+    return pal, arr
+
+
+def mesh_fluid(cells, fluids=True):
+    pal, idx = fluid_block_idx(cells)
+    payloads = {(0, 0): make_payload(secs=[(pal, idx)])}
+    quads, pal_out, _, _ = mesher.mesh_payload(payloads, fluids=fluids)
+    water = [q for q in quads if "water" in pal_out[int(q[2])][1]]
+    return quads, water, pal_out
+
+
+class TestFluidGeometry(unittest.TestCase):
+    """类原版流体几何（对照 MC FluidRenderer 的列高度 / 四角平滑）。"""
+
+    def test_pool_surface_is_8_9(self):
+        cells = {}
+        for x in range(5):
+            for z in range(5):
+                cells[(x, 0, z)] = "minecraft:stone"
+        for x in range(1, 4):
+            for z in range(1, 4):
+                cells[(x, 1, z)] = "minecraft:water[level=0]"
+        quads, water, pal = mesh_fluid(cells)
+        # 水池中心格 (2,1,2) 的顶面四角都在 y = 1 + 8/9（水源高度）
+        top = [q for q in water if q[1] == 2
+               and min(v[0] for v in q[0]) >= 2 and max(v[0] for v in q[0]) <= 3
+               and min(v[2] for v in q[0]) >= 2 and max(v[2] for v in q[0]) <= 3]
+        self.assertEqual(len(top), 1)
+        for v in top[0][0]:
+            self.assertAlmostEqual(v[1], 1.0 + 8.0 / 9.0, places=5)
+
+    def test_isolated_source_corner_droop(self):
+        # 孤立水源四周皆空气：角高度 = (8/9 × 10) / (10 + 1 + 1) = 20/27
+        quads, water, pal = mesh_fluid({(0, 0, 0): "minecraft:water[level=0]"})
+        top = [q for q in water if q[1] == 2]
+        self.assertEqual(len(top), 1)
+        for v in top[0][0]:
+            self.assertAlmostEqual(v[1], 20.0 / 27.0, places=5)
+
+    def test_flowing_level_height(self):
+        # level=7 且四周空气：own = 7/9 < 0.8 -> 权重 1 -> (7/9)/3
+        quads, water, pal = mesh_fluid({(0, 0, 0): "minecraft:water[level=7]"})
+        top = [q for q in water if q[1] == 2]
+        self.assertEqual(len(top), 1)
+        for v in top[0][0]:
+            self.assertAlmostEqual(v[1], (7.0 / 9.0) / 3.0, places=5)
+
+    def test_no_full_cube_water(self):
+        cells = {(0, 0, 0): "minecraft:water[level=0]",
+                 (1, 0, 0): "minecraft:water[level=0]"}
+        quads, water, pal = mesh_fluid(cells)
+        self.assertTrue(water)
+        for q in water:
+            for v in q[0]:
+                self.assertLess(v[1], 1.0 - 1e-6)     # 水面必须低于方块顶面
+
+    def test_same_fluid_face_culled(self):
+        cells = {(0, 0, 0): "minecraft:water[level=0]",
+                 (1, 0, 0): "minecraft:water[level=0]"}
+        quads, water, pal = mesh_fluid(cells)
+        for verts, d, blk, ao in water:
+            xs = [v[0] for v in verts]
+            if min(xs) == 1 and max(xs) == 1:
+                self.fail("水-水界面未剔除: %s" % (verts,))
+
+    def test_fluid_winding(self):
+        cells = {(0, 0, 0): "minecraft:water[level=0]",
+                 (0, 0, 1): "minecraft:water[level=7]"}
+        quads, water, pal = mesh_fluid(cells)
+        self.assertTrue(water)
+        # 流体面是斜坡（相邻角高度差可达半格），法向会明显偏离面方向，
+        # 因此这里只要求「法向与面方向同号且占主导」（斜率上限 45° -> 0.707）
+        axis = {0: (0, 1), 1: (0, -1), 2: (1, 1), 3: (1, -1), 4: (2, 1), 5: (2, -1)}
+        for verts, d, blk, ao in water:
+            p = [np.asarray(v, float) for v in verts]
+            n = np.cross(p[1] - p[0], p[2] - p[0])
+            if np.allclose(n, 0):
+                n = np.cross(p[1] - p[0], p[3] - p[0])
+            self.assertGreater(float(np.linalg.norm(n)), 1e-9)
+            n = n / np.linalg.norm(n)
+            ax, sign = axis[d]
+            self.assertGreater(float(n[ax]) * sign, 0.5,
+                               "winding fail dir=%d n=%s" % (d, n))
+
+    def test_fluids_off_keeps_full_cube(self):
+        # 默认关闭（服务端网格 MCM1 为整型块坐标）-> 仍是整方块，与 Java 侧一致
+        cells = {(0, 0, 0): "minecraft:water[level=0]"}
+        quads, water, pal = mesh_fluid(cells, fluids=False)
+        self.assertTrue(any(max(v[1] for v in q[0]) == 1.0 for q in water))
+
 
 
 if __name__ == "__main__":

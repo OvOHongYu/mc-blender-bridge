@@ -298,11 +298,11 @@ class World:
             for dz in (-1, 0, 1):
                 payloads[(dx, dz)] = self.payload(cx + dx, cz + dz, ymin, ymax)
         if lod == 2:
-            quads, pal, _ = mesher.shell_payload(payloads)
+            quads, pal, _, _ = mesher.shell_payload(payloads)
             r = {"quads": quads, "pal": pal, "yBottom": payloads[(0, 0)]["yBottom"]}
         else:
             cls, gid, H, pal = mesher.assemble_padded(payloads)
-            quads = mesher.mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast)
+            quads, _ = mesher.mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast)
             r = {"quads": quads, "pal": pal, "yBottom": payloads[(0, 0)]["yBottom"]}
         with self._mesh_lock:
             self._mesh_cache[key] = r

@@ -182,9 +182,14 @@ def _decode_block_states(bs):
     names = []
     for p in pal:
         if isinstance(p, dict):
-            names.append(str(p.get("Name", "minecraft:air")))
+            base = str(p.get("Name", "minecraft:air"))
+            props = p.get("Properties") or {}
+            if props:
+                kv = ",".join("%s=%s" % (k, props[k]) for k in sorted(props))
+                base = "%s[%s]" % (base, kv)
+            names.append(base)
         else:
-            names.append(str(p).split("[", 1)[0])
+            names.append(str(p))
     data = bs.get("data")
     if len(pal) == 1 or data is None or len(data) == 0:
         return names, np.zeros(4096, np.uint16)
@@ -205,11 +210,17 @@ def _decode_block_states(bs):
 
 
 def _classify(name):
-    """base 名 -> class 字节（未知方块按不透明处理）。"""
+    """base 名 -> class 字节（共享表优先，其次资产包烘焙分类，兜底不透明）。"""
     base = name.split("[", 1)[0]
     gid = B.INDEX.get(base)
     if gid is not None:
         return int(B.CLASS[gid])
+    from . import assets
+    pack = assets.current()
+    if pack is not None:
+        c = pack.classify(base)
+        if c is not None:
+            return c
     return 1
 
 
@@ -482,17 +493,21 @@ class SaveClient:
                 payloads[(dx, dz)] = self.world.chunk_payload(
                     dim, cx + dx, cz + dz, ymin, ymax)
         if lod == 2:
-            quads, pal, _ = mesher.shell_payload(payloads)
+            quads, pal, _, _ = mesher.shell_payload(payloads)
+            models = []
         else:
+            from . import assets
             cls, gid, H, pal = mesher.assemble_padded(payloads)
-            quads = mesher.mesh_padded(cls, gid, with_ao=with_ao,
-                                       leaves_fast=(leaves == "fast"))
+            quads, models = mesher.mesh_padded(
+                cls, gid, with_ao=with_ao, leaves_fast=(leaves == "fast"),
+                palette=pal, pack=assets.current())
         nq = len(quads)
         verts = np.array([q[0] for q in quads], np.int16) if nq else np.zeros((0, 4, 3), np.int16)
         dirs = np.array([q[1] for q in quads], np.uint8)
         blocks_ = np.array([q[2] for q in quads], np.uint16)
         aos = np.array([q[3] for q in quads], np.uint8).reshape(-1, 4)
         out = {"verts": verts, "dirs": dirs, "blocks": blocks_, "aos": aos,
+               "models": models,
                "palette": [(c, n) for c, n in pal],
                "yBottom": payloads[(0, 0)]["yBottom"]}
         with self.world.lock:
