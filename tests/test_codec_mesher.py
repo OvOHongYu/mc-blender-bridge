@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """codec / mesher 单元测试（不依赖网络与 bpy）。"""
 import os
+import random
 import sys
 import unittest
 
@@ -320,12 +321,23 @@ class TestFluidGeometry(unittest.TestCase):
             self.assertAlmostEqual(v[1], 20.0 / 27.0, places=5)
 
     def test_flowing_level_height(self):
-        # level=7 且四周空气：own = 7/9 < 0.8 -> 权重 1 -> (7/9)/3
+        # 方块 level=7 = 流体 level 1（最远离水源、最薄）：own = 1/9 -> 四周空气 -> (1/9)/3
         quads, water, pal = mesh_fluid({(0, 0, 0): "minecraft:water[level=7]"})
         top = [q for q in water if q[1] == 2]
         self.assertEqual(len(top), 1)
         for v in top[0][0]:
-            self.assertAlmostEqual(v[1], (7.0 / 9.0) / 3.0, places=5)
+            self.assertAlmostEqual(v[1], (1.0 / 9.0) / 3.0, places=5)
+
+    def test_level_is_inverted_vs_fluid_level(self):
+        # 回归：方块状态 level 与流体 level 相反（FluidBlock.statesByLevel = getFlowing(8-level)）
+        # 靠近水源的 level=1 必须比远处的 level=7 高
+        near = [q for q in mesh_fluid({(0, 0, 0): "minecraft:water[level=1]"})[1]
+                if q[1] == 2][0]
+        far = [q for q in mesh_fluid({(0, 0, 0): "minecraft:water[level=7]"})[1]
+               if q[1] == 2][0]
+        self.assertAlmostEqual(max(v[1] for v in near[0]), (7.0 / 9.0) / 3.0, places=5)
+        self.assertAlmostEqual(max(v[1] for v in far[0]), (1.0 / 9.0) / 3.0, places=5)
+        self.assertGreater(max(v[1] for v in near[0]), max(v[1] for v in far[0]))
 
     def test_no_full_cube_water(self):
         cells = {(0, 0, 0): "minecraft:water[level=0]",
@@ -370,6 +382,287 @@ class TestFluidGeometry(unittest.TestCase):
         quads, water, pal = mesh_fluid(cells, fluids=False)
         self.assertTrue(any(max(v[1] for v in q[0]) == 1.0 for q in water))
 
+
+
+# -------------------------------------------- 流体几何 vs 原版（对拍参考实现） ----
+# 参考实现逐指令还原 MC 1.21.1 net/minecraft/client/render/block/FluidRenderer
+# （javap -c 反汇编 getFluidHeight / calculateFluidHeight / addHeight / render）：
+#   getFluidHeight(world, fluid, pos, state, fluidState):
+#       同种流体 -> 上方仍是同种流体 ? 1.0 : fluidState.getHeight()
+#       异种     -> state.isSolid() ? -1.0 : 0.0
+#   calculateFluidHeight(world, fluid, own, f4, f5, cornerPos):
+#       f5>=1 或 f4>=1 -> 1.0；f5>0 或 f4>0 时先计入对角块（>=1 则直接 1.0）；
+#       再按 addHeight 权重平均 own / f5 / f4（h>=0.8 权重 10，0<=h<0.8 权重 1，h<0 忽略）
+#   render: own >= 1.0 时四角直接 1.0；否则 NE=calc(own,n,e) NW=calc(own,n,w)
+#           SE=calc(own,s,e) SW=calc(own,s,w)（n/s/w/e 为同层邻居列高度）
+_HINT_CLASS = (("water", B.LIQUID), ("lava", B.LIQUID), ("glass", B.TRANSPARENT),
+               ("leaves", B.CUTOUT), ("grass", B.CUTOUT), ("air", B.AIR))
+
+
+def hinted_class(name):
+    """按名字启发式判定 class（与资产包烘焙 _LIQUID_HINT 等一致；lava 不在共享小表里）。"""
+    base = B.base_name(name)
+    if base in B.INDEX:
+        return int(B.CLASS[B.INDEX[base]])
+    low = base.lower()
+    for hint, cls in _HINT_CLASS:
+        if hint in low:
+            return cls
+    return B.OPAQUE
+
+
+def hinted_payload(cells):
+    """{(x,y,z): 状态名} -> ({...payload}, palette)。class 用 hinted_class。"""
+    names = sorted(set(cells.values()) | {"minecraft:air"})
+    pal = [(hinted_class(n), n) for n in names]
+    pmap = {n: i for i, (c, n) in enumerate(pal)}
+    arr = np.zeros(4096, np.uint16)
+    for (x, y, z), n in cells.items():
+        arr[(y << 8) | (z << 4) | x] = pmap[n]
+    return make_payload(secs=[(pal, arr)]), pal
+
+
+def _ref_solid(name):
+    """原版 BlockState.isSolid()：按碰撞箱判定（树叶碰撞箱满格 -> 实心）。"""
+    c = hinted_class(name)
+    return c in (B.OPAQUE, B.TRANSPARENT, B.NONCUBE) or (c == B.CUTOUT and "leaves" in name)
+
+
+def _ref_state_height(name):
+    """FluidState.getHeight() = 流体 level/9。
+
+    方块状态 level 与流体 level 相反（FluidBlock.statesByLevel[i] = getFlowing(8-i)）：
+    0 -> 静止(8/9)；1..7 -> (8-level)/9；8 -> 下落(8/9)。"""
+    v = B.props_of(name).get("level")
+    if v is None:
+        return 8.0 / 9.0
+    v = int(v)
+    if v == 0 or v >= 8:
+        return 8.0 / 9.0
+    return (8 - v) / 9.0
+
+
+def _ref_col_height(world, fluid, pos):
+    x, y, z = pos
+    st = world.get(pos, "minecraft:air")
+    if B.base_name(st) == fluid:
+        if B.base_name(world.get((x, y + 1, z), "minecraft:air")) == fluid:
+            return 1.0
+        return _ref_state_height(st)
+    return -1.0 if _ref_solid(st) else 0.0
+
+
+def _ref_corner(world, fluid, own, fa, fb, cpos):
+    if fa >= 1.0 or fb >= 1.0:
+        return 1.0
+    acc = [0.0, 0.0]
+
+    def add(h):
+        if h >= 0.8:
+            acc[0] += h * 10.0
+            acc[1] += 10.0
+        elif h >= 0.0:
+            acc[0] += h
+            acc[1] += 1.0
+
+    if fa > 0.0 or fb > 0.0:
+        h = _ref_col_height(world, fluid, cpos)
+        if h >= 1.0:
+            return 1.0
+        add(h)
+    add(own)
+    add(fa)
+    add(fb)
+    return acc[0] / acc[1]
+
+
+def ref_fluid_corners(world, pos):
+    """原版四角高度：NE=(+x,-z) NW=(-x,-z) SE=(+x,+z) SW=(-x,+z)。"""
+    fluid = B.base_name(world[pos])
+    x, y, z = pos
+    own = _ref_col_height(world, fluid, pos)
+    if own >= 1.0:
+        return {"NE": 1.0, "NW": 1.0, "SE": 1.0, "SW": 1.0}
+    n = _ref_col_height(world, fluid, (x, y, z - 1))
+    s = _ref_col_height(world, fluid, (x, y, z + 1))
+    w = _ref_col_height(world, fluid, (x - 1, y, z))
+    e = _ref_col_height(world, fluid, (x + 1, y, z))
+    return {
+        "NE": _ref_corner(world, fluid, own, n, e, (x + 1, y, z - 1)),
+        "NW": _ref_corner(world, fluid, own, n, w, (x - 1, y, z - 1)),
+        "SE": _ref_corner(world, fluid, own, s, e, (x + 1, y, z + 1)),
+        "SW": _ref_corner(world, fluid, own, s, w, (x - 1, y, z + 1)),
+    }
+
+
+# 面方向 -> [(顶点 x 偏移, 顶点 z 偏移, 角名)]（顶面 2 / 侧面 0,1,4,5；底面 3 无角高度）
+_FACE_CORNERS = {
+    2: [(0, 0, "NW"), (0, 1, "SW"), (1, 1, "SE"), (1, 0, "NE")],
+    0: [(1, 0, "NE"), (1, 1, "SE")],
+    1: [(0, 0, "NW"), (0, 1, "SW")],
+    4: [(0, 1, "SW"), (1, 1, "SE")],
+    5: [(0, 0, "NW"), (1, 0, "NE")],
+}
+
+
+def mesh_fluid_face_corners(cells):
+    """流体四边形 -> [(pos, dir, {角名: 相对高度})]，用于与原版四角对拍。"""
+    payload, pal = hinted_payload(cells)
+    quads, pal_out, _, _ = mesher.mesh_payload({(0, 0): payload}, fluids=True)
+    out = []
+    for verts, d, blk, ao in quads:
+        if B.base_name(pal_out[int(blk)][1]) not in ("minecraft:water", "minecraft:lava"):
+            continue
+        # 面在方块边界上：+x 面 / +z 面 的 min 坐标比方块自身大 1
+        X = int(min(v[0] for v in verts)) - (1 if d == 0 else 0)
+        Z = int(min(v[2] for v in verts)) - (1 if d == 4 else 0)
+        # 侧面/底面底边恰在 Y；顶面四角可能全为 1.0（邻居满格），此时 min y = Y+1
+        ymin = min(v[1] for v in verts)
+        ymax = max(v[1] for v in verts)
+        Y = (int(np.ceil(ymax - 1e-6)) - 1) if d == 2 else int(round(ymin))
+        top = {}
+        for v in verts:                      # 同一 (x,z) 列有底/顶两个顶点，取最高者
+            k = (int(v[0]), int(v[2]))
+            top[k] = max(top.get(k, -1e9), v[1])
+        cs = {}
+        for ox, oz, cn in _FACE_CORNERS.get(d, []):
+            if (X + ox, Z + oz) in top:
+                cs[cn] = top[(X + ox, Z + oz)] - Y
+        out.append(((X, Y, Z), d, cs))
+    return out
+
+
+class TestFluidVanillaConformance(unittest.TestCase):
+    """流体四角高度与原版游戏逐面一致（回归：曾出现瀑布/多层水体侧面收成斜边）。"""
+
+    def assert_vanilla(self, cells):
+        world = dict(cells)
+        checked = 0
+        for pos, d, cs in mesh_fluid_face_corners(cells):
+            if pos not in world:             # 邻居区块填充进来的方块不在本 payload
+                continue
+            ref = ref_fluid_corners(world, pos)
+            for cn, got in cs.items():
+                checked += 1
+                self.assertAlmostEqual(
+                    got, ref[cn], places=5,
+                    msg="pos=%s dir=%d 角%s 网格=%.4f 原版=%.4f" % (pos, d, cn, got, ref[cn]))
+        self.assertGreater(checked, 0)
+        return checked
+
+    def test_pool_two_layers(self):
+        cells = {}
+        for x in range(4, 12):
+            for z in range(4, 12):
+                cells[(x, 0, z)] = "minecraft:water[level=0]"
+                if x in (4, 11) or z in (4, 11):
+                    cells[(x, 1, z)] = "minecraft:water[level=0]"
+        self.assert_vanilla(cells)
+
+    def test_waterfall_column(self):
+        cells = {(5, y, 5): "minecraft:water[level=0]" for y in range(1, 5)}
+        self.assert_vanilla(cells)
+        # 每段侧面（下方仍有水）的两条顶边顶点都必须到格顶：原版四角 = 1.0
+        quad_list = mesher.mesh_payload({(0, 0): hinted_payload(cells)[0]}, fluids=True)[0]
+        checked = 0
+        for verts, d, blk, ao in quad_list:
+            if d not in (0, 1, 4, 5):
+                continue
+            base = min(float(v[1]) for v in verts)
+            if base >= 4.0:
+                continue                     # 顶端一块上方是空气 -> 原版 8/9
+            tops = [float(v[1]) for v in verts if float(v[1]) > base + 1e-6]
+            self.assertTrue(tops)
+            for y in tops:
+                self.assertAlmostEqual(y - base, 1.0, places=5)
+            checked += 1
+        self.assertGreater(checked, 3)
+
+    def test_flowing_stair(self):
+        cells = {(5, 1, 5): "minecraft:water[level=0]"}
+        for x in range(6, 11):
+            cells[(x, 1, 5)] = "minecraft:water[level=%d]" % (11 - x)
+        self.assert_vanilla(cells)
+
+    def test_lava_and_leaves_neighbours(self):
+        cells = {(5, 2, 5): "minecraft:water[level=0]",
+                 (4, 2, 5): "minecraft:lava[level=3]", (6, 2, 5): "minecraft:lava",
+                 (5, 2, 4): "minecraft:oak_leaves[distance=1]",
+                 (4, 2, 4): "minecraft:short_grass", (5, 2, 6): "minecraft:oak_stairs"}
+        self.assert_vanilla(cells)
+
+    def test_random_blobs(self):
+        rnd = random.Random(20240607)
+        pool = ["minecraft:water[level=0]", "minecraft:water[level=1]",
+                "minecraft:water[level=4]", "minecraft:water[level=7]",
+                "minecraft:stone", "minecraft:glass", "minecraft:oak_leaves",
+                "minecraft:short_grass", "minecraft:oak_stairs", "minecraft:lava"]
+        for _ in range(4):
+            cells = {}
+            for x in range(2, 14):
+                for z in range(2, 14):
+                    for y in range(1, 4):
+                        if rnd.random() < 0.5:
+                            cells[(x, y, z)] = rnd.choice(pool)
+            self.assert_vanilla(cells)
+
+    def test_water_above_keeps_full_column(self):
+        # 回归：下方水块上方仍是水 -> 原版四角 = 1.0；曾错误地按 10:1:1 平均成 0.8333
+        cells = {(5, 1, 5): "minecraft:water[level=0]", (5, 2, 5): "minecraft:water[level=0]"}
+        payload, pal = hinted_payload(cells)
+        quads = [q for q in mesher.mesh_payload({(0, 0): payload}, fluids=True)[0]
+                 if B.base_name(pal[int(q[2])][1]) == "minecraft:water"]
+        side = [q for q in quads if q[1] == 1 and abs(min(v[1] for v in q[0]) - 1.0) < 1e-6]
+        self.assertEqual(len(side), 1)
+        self.assertAlmostEqual(max(float(v[1]) for v in side[0][0]), 2.0, places=5)
+
+
+class TestFluidModelOverlap(unittest.TestCase):
+    """回归：资产包给液体注入的整方块烘焙模型必须被剔除（否则与流体几何重叠）。
+
+    pack.use_model 只看模型占空比、与 class 无关，水/岩浆在真实资产包里同样是
+    use_model=True（实测 dist/assets.mcba：water/lava classify=5 use_model=True）。"""
+
+    class _FakePack(object):
+        """最小资产包替身：仅水有烘焙模型（一整格立方体）。"""
+
+        def __init__(self):
+            cube = ((0, 0, 0), (0, 0, 16), (0, 16, 16), (0, 16, 0))
+            self.variants = [[(cube, 0, 0, -1, 0, ((0.0, 0.0),) * 4)]]
+
+        def use_model(self, block):
+            return block == "minecraft:water"
+
+        def variant_indices(self, block, props=None):
+            return [0] if block == "minecraft:water" else []
+
+    def _payload(self):
+        pal = [(0, "minecraft:air"), (3, "minecraft:water[level=0]"), (1, "minecraft:stone")]
+        idx = np.zeros(4096, np.uint16)
+        for z in range(16):
+            for x in range(16):
+                idx[(0 << 8) | (z << 4) | x] = 2          # 石地板
+        idx[(1 << 8) | (3 << 4) | 3] = 1                  # 一格水
+        return make_payload(secs=[(pal, idx)])
+
+    def test_fluid_geometry_replaces_pack_model(self):
+        pack = self._FakePack()
+        payload = self._payload()
+        quads, pal, _, models = mesher.mesh_payload({(0, 0): payload},
+                                                    fluids=True, pack=pack)
+        liq = {i for i, (c, _) in enumerate(pal) if c == B.LIQUID}
+        self.assertTrue(liq)
+        self.assertTrue(any(int(q[2]) in liq for q in quads))            # 流体几何在
+        self.assertFalse([m for m in models if int(m[6]) in liq],        # 液体模型没了
+                         "液体的整方块烘焙模型未被剔除，会与流体几何重叠")
+
+    def test_pack_model_kept_when_fluids_off(self):
+        # fluids=False（服务端网格路径）时仍走资产包/整方块，行为不变
+        pack = self._FakePack()
+        quads, pal, _, models = mesher.mesh_payload({(0, 0): self._payload()},
+                                                    fluids=False, pack=pack)
+        liq = {i for i, (c, _) in enumerate(pal) if c == B.LIQUID}
+        self.assertTrue([m for m in models if int(m[6]) in liq])
 
 
 if __name__ == "__main__":

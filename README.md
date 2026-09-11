@@ -84,7 +84,7 @@ N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
 | `blender_addon/mc_bridge/` | Blender 插件（bpy 层 + 纯 Python 核心） | ✅ 已实现并测试 |
 | `server_sim/` | MC 模拟服务器（无 MC 环境的开发/测试替身，与模组 API 同构） | ✅ 已实现并测试 |
 | `mcmod/` | Fabric 服务端模组（Java） | ✅ 源码完整；纯 Java 部分已与 Python 逐字节对拍 |
-| `tests/` | 61 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
+| `tests/` | 95 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
 | `docs/` | 设计方案 / 协议规范 / 用户手册 / 路线图 / 预览图 | ✅ |
 | `tools/` | 资产烘焙、夹具生成、预览导出、Java 合并验证脚本 | ✅ |
 
@@ -128,7 +128,7 @@ cp mcbridge-1.0.0.jar <服务端>/mods/
 ## 测试
 
 ```bash
-# Python 全量（53 项：编解码/网格器/调度器/存档解析/插件冒烟/端到端）
+# Python 全量（95 项：编解码/网格器/调度器/存档解析/插件冒烟/端到端/原版对拍）
 python3 -m pytest tests/
 
 # 跨语言一致性（Java vs Python 夹具逐字节对拍，仅需 JRE）
@@ -176,8 +176,15 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
   完整方块近似。动态 BlockState/BakedModel（代码模型，非 JSON）同样回退近似。
 - 无资产包时非完整方块（楼梯/栅栏等）按完整方块近似，贴图为程序化色块。
 - 流体（水/岩浆）在**本地网格路径**（存档模式、`mode=raw`）按原版方式渲染：
-  水面高度 = `level/9`（水源 8/9）、四角按邻居高度平滑、同类流体互不生成面；
+  水面高度 = 流体 level/9（水源 8/9；**方块状态 `level` 与流体 level 相反**——
+  `level=1` 最靠近水源最厚 7/9，`level=7` 最远最薄 1/9）、四角按邻居高度平滑、
+  同类流体互不生成面；
+  上方仍是同种流体时侧面为整格竖直面（原版 `FluidRenderer` 的 `own >= 1.0` 分支）；
   走服务端网格（`mode=mesh`，MCM1 整型块坐标）时仍为整方块。
+  逐条规则见 [docs/设计方案.md](docs/设计方案.md) §5.7。
+  注：岩浆的液体分类来自资产包（`bake_assets` 的 `water/lava` 启发式）；
+  未加载资产包时共享小表只收录水，岩浆会退回不透明整方块。淡水体（海/湖/含水层）
+  与含水方块不受此限。
 - 实体/方块实体不在范围内。
 - 存档模式只读（不能像控制模式那样把玩家传送到相机位置）；
   自定义数据包维度需手动适配 ymin/height。

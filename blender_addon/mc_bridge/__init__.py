@@ -6,7 +6,7 @@
 bl_info = {
     "name": "MC Bridge 动态区块",
     "author": "zcube",
-    "version": (1, 2, 1),
+    "version": (1, 2, 2),
     "blender": (3, 6, 0),
     "location": "3D 视口 N 面板 > MC Bridge",
     "description": "借助本地 MC(Fabric 模组)实例或存档文件，按相机位置动态加载/卸载区块，"

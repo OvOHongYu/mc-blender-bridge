@@ -61,11 +61,35 @@
 > lightning_rod 的四个水平朝向、楼梯 half=top 的 x=180 组合整体偏 90°/镜像。
 > ④ 实现 `uvlock`：按 MC `BakedQuadFactory.uvLock`（`D(d')·R·D(d)^T`，
 > 96 组实测矩阵核对）锁定 UV，修复倒置楼梯贴图整体转 180°。
-> ⑤ 类原版流体几何：按 MC `FluidRenderer` 的列高度（`level/9`，水源 8/9）与
+> ⑤ 类原版流体几何：按 MC `FluidRenderer` 的列高度（流体 level/9，水源 8/9）与
 > 四角加权平滑生成顶/侧/底面，不再把水/岩浆画成整方块。仅本地网格路径
 > （存档模式 / `mode=raw`）支持——服务端 MCM1 顶点为整型块坐标，表示不了
 > 水面高度，故 `mesh_payload(fluids=False)` 默认保持整方块以维持跨语言一致。
-
+>
+> 修复记录（v1.2.2 · 流体几何三处修正，均由"与原版对拍 + 实机观感"暴露）：
+>
+> ⑥ **四角规则漏了原版 `render` 的首个分支**——本列 `h >= 1.0`（上方仍是同种流体、
+> 整列满格）时四角直接取 1.0，**不进入加权平均**。漏掉后瀑布柱与多层水体的池壁侧面
+> 从整格收到 0.8333（每格一段锯齿 + 格间缝隙）。同时按原版补齐两处：邻居列必须与
+> **当前渲染流体**同种才按流体高度计入（水/岩浆相邻时互不借用）；实心判定改用
+> `isSolid()` 语义（按碰撞箱，树叶满格 → 视为墙，否则水边被反常拉低）。
+>
+> ⑦ **方块状态的 `level` 与流体 level 相反**——`FluidBlock.statesByLevel[i] =
+> getFlowing(8-i)`、`FlowableFluid.getBlockStateLevel() = 8 - getLevel()`（均自 1.21.1 jar
+> 反汇编核对）。原先按方块 `level/9` 原样取高，等于把整片水面坡度**反过来**：紧邻水源的
+> `level=1` 画成 1/9（应为 7/9）、最远的 `level=7` 画成 7/9（应为 1/9），于是出现
+> "水源处凹陷、远处反而隆起"的反直觉坡度。现按 `level=0/8 → 8/9、level=N(1..7) →
+> (8-N)/9` 取高。
+>
+> ⑧ **资产包给液体注入的整方块模型未剔除**——`pack.use_model()` 按模型占空比判定、
+> 与 class 无关，真实资产包里 water/lava 同样是 `use_model=True`；`mesh_payload(fluids=True)`
+> 原先只删贪心液体四边形、漏删 model 条目，导致同一格里整方块与流体几何**重叠**。
+> 现在 fluids=True 时一并按液体 id 过滤 models（`fluids=False` 行为不变）。
+>
+> 测试：新增原版算法对拍 `tests/test_codec_mesher.py::TestFluidVanillaConformance`
+> （内置按 javap 反汇编还原的 FluidRenderer 参考实现）、存档端到端
+> `test_save_mode.py::TestSaveModeFluidGeometry`、液体模型重叠回归
+> `TestFluidModelOverlap`，以及 `test_level_is_inverted_vs_fluid_level`。
 R2 的推广：对**模组方块**同样生效。
 
 - 模组方块模型注册走同一套 vanilla 格式（blockstates/models JSON），

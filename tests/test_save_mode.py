@@ -80,11 +80,16 @@ def _palette_compound(names):
     """真实存档格式的 palette：每项是 compound {Name, Properties}。
 
     注意：list 元素的类型在 list 头声明一次，元素本身**不带类型字节**，
-    compound 元素直接写字段 + END。"""
+    compound 元素直接写字段 + END。
+    名字可带 "minecraft:water[level=4]" 形式的状态后缀（拆进 Properties）。"""
     items = []
     for n in names:
-        props = [(10, "Properties", _compound([]))]
-        items.append(_compound([(8, "Name", _string(n))] + props))
+        i = n.find("[")
+        base, prop = (n[:i], n[i + 1:-1]) if i >= 0 else (n, "")
+        pairs = [kv.split("=", 1) for kv in prop.split(",") if "=" in kv]
+        props = [(8, k, _string(v)) for k, v in sorted(pairs)]
+        items.append(_compound([(8, "Name", _string(base)),
+                                (10, "Properties", _compound(props))]))
     return _list(10, items)
 
 
@@ -478,6 +483,134 @@ class TestSaveModeAddon(unittest.TestCase):
         self.assertIsNotNone(bpy.data.objects.get(self.importer.ROOT_NAME))
         self.assertEqual(self.importer.count_live(), 0)
 
+# ------------------------------------------------ 存档模式：流体几何（端到端） ----
+
+def _fluid_chunk(cx, cz):
+    """0 层 stone 地板；1..2 层水源池（多层 -> 侧面必须整格）；x=7,z=7 三层瀑布柱；
+    x=9..13 的 level=4 流动水池（水位高度必须来自 level 属性）。"""
+    pal = ["minecraft:air", "minecraft:stone", "minecraft:water[level=0]",
+           "minecraft:water[level=4]"]
+    if (cx, cz) != (0, 0):
+        return _chunk_nbt(cx, cz, [(0, ["minecraft:air"], None)])
+    idx = np.zeros(4096, np.int64)
+    for z in range(16):
+        for x in range(16):
+            idx[(0 << 8) | (z << 4) | x] = 1                       # 地板
+    for z in range(1, 6):
+        for x in range(1, 6):
+            idx[(1 << 8) | (z << 4) | x] = 2                       # 水源池（下）
+            idx[(2 << 8) | (z << 4) | x] = 2                       # 水源池（上）
+    for ly in (1, 2, 3):
+        idx[(ly << 8) | (7 << 4) | 7] = 2                          # 瀑布柱
+    for z in range(1, 6):
+        for x in range(9, 14):
+            idx[(1 << 8) | (z << 4) | x] = 3                       # level=4 水池
+    return _chunk_nbt(cx, cz, [(0, pal, idx)])
+
+
+def _build_fluid_world(tmp):
+    world = os.path.join(tmp, "FluidWorld")
+    os.makedirs(os.path.join(world, "region"), exist_ok=True)
+    chunks = {}
+    for cx in range(-1, 2):
+        for cz in range(-1, 2):
+            chunks[(cx & 31, cz & 31)] = _fluid_chunk(cx, cz)
+    _write_region(os.path.join(world, "region", "r.0.0.mca"), chunks)
+    with open(os.path.join(world, "level.dat"), "wb") as f:
+        f.write(_level_dat())
+    return world
+
+
+class TestSaveModeFluidGeometry(unittest.TestCase):
+    """存档模式流体几何：解析 -> payload -> 本地网格，四角高度必须符合原版。
+
+    回归：液体方块「上方仍是同种流体」时原版四角 = 1.0（整格竖直侧面），
+    曾按加权平均收成 0.8333，导致瀑布/多层水体侧面出现锯齿与缝隙。"""
+
+    LY = 64                 # 世界 y -> payload 局部 y（yBottom = -64）
+
+    @classmethod
+    def setUpClass(cls):
+        from mc_bridge.core import blocks as _B
+        from mc_bridge.core import mesher as _mesher
+        from mc_bridge.core.anvil import AnvilWorld, SaveClient
+        cls.B, cls.mesher = _B, _mesher
+        cls.tmp = tempfile.mkdtemp()
+        cls.world_dir = _build_fluid_world(cls.tmp)
+        cls.client = SaveClient(AnvilWorld(cls.world_dir))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _mesh(self):
+        payloads = {}
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                payloads[(dx, dz)] = self.client.chunk("minecraft:overworld", dx, dz, -64, 320)
+        quads, pal, _, _ = self.mesher.mesh_payload(payloads, fluids=True)
+        return quads, pal
+
+    def _block_at(self, payloads, x, wy, z):
+        """区块内 (x, 世界y, z) 的方块状态名（不在本区块/空气则返回 air）。"""
+        pl = payloads[(0, 0)]
+        si = (wy - pl["yBottom"]) // 16
+        if si < 0 or si >= len(pl["sections"]) or not pl["sections"][si]:
+            return "minecraft:air"
+        s = pl["sections"][si]
+        ly = (wy - pl["yBottom"]) % 16
+        return s["palette"][int(s["indices"][(ly << 8) | (z << 4) | x])][1]
+
+    def test_deep_liquid_sides_are_full_cells(self):
+        """上方仍是同种液体的方块，侧面顶边必须整格（原版四角 = 1.0）。
+
+        回归：曾按加权平均收成 0.8333，瀑布柱与多层水体池壁出现锯齿/缝隙。"""
+        payloads = {(dx, dz): self.client.chunk("minecraft:overworld", dx, dz, -64, 320)
+                    for dx in (-1, 0, 1) for dz in (-1, 0, 1)}
+        quads, pal, _, _ = self.mesher.mesh_payload(payloads, fluids=True)
+        liq = {i for i, (c, _) in enumerate(pal) if c == self.B.LIQUID}
+        checked = 0
+        for verts, d, blk, ao in quads:
+            if int(blk) not in liq or d not in (0, 1, 4, 5):
+                continue
+            X = min(int(v[0]) for v in verts) - (1 if d == 0 else 0)
+            Z = min(int(v[2]) for v in verts) - (1 if d == 4 else 0)
+            base = min(float(v[1]) for v in verts)
+            wy = int(round(base)) - self.LY
+            if wy < 0 or wy >= 320 or not (0 <= X < 16 and 0 <= Z < 16):
+                continue
+            here = self.B.base_name(self._block_at(payloads, X, wy, Z))
+            above = self.B.base_name(self._block_at(payloads, X, wy + 1, Z))
+            if here != above or here not in ("minecraft:water", "minecraft:lava"):
+                continue
+            # 侧面顶边两个顶点：原版四角均为 1.0（= base + 1.0），不允许 0.8333 收边
+            tops = [float(v[1]) for v in verts if float(v[1]) > base + 1e-6]
+            self.assertTrue(tops, "侧面缺少顶边顶点: %s" % (verts,))
+            for y in tops:
+                self.assertAlmostEqual(y - base, 1.0, places=5,
+                                       msg="pos=(%d,%d,%d) dir=%d 侧面顶边 %.4f" % (X, wy, Z, d, y - base))
+            checked += 1
+        self.assertGreater(checked, 8, "未覆盖到足够的多层液体侧面")
+
+    def test_surface_heights_from_level_property(self):
+        quads, pal = self._mesh()
+        liq = {i for i, (c, _) in enumerate(pal) if c == self.B.LIQUID}
+        tops = [q for q in quads if int(q[2]) in liq and q[1] == 2]
+
+        def surface_at(x, z, ly):
+            hit = [q for q in tops
+                   if min(v[0] for v in q[0]) == x and min(v[2] for v in q[0]) == z
+                   and abs(min(v[1] for v in q[0]) - (ly + self.LY)) < 1.0]
+            self.assertEqual(len(hit), 1, "x=%d z=%d ly=%d" % (x, z, ly))
+            return [float(v[1]) for v in hit[0][0]]
+
+        # 水源池上层内部格：四角 8/9（水源高度），且必须低于格顶
+        for y in surface_at(3, 3, 2):
+            self.assertAlmostEqual(y, 2 + self.LY + 8.0 / 9.0, places=5)
+        # level=4 流动水池内部格：四角 4/9（水位来自存档 level 属性）
+        for y in surface_at(11, 3, 1):
+            self.assertAlmostEqual(y, 1 + self.LY + 4.0 / 9.0, places=5)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

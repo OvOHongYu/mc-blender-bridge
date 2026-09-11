@@ -473,25 +473,42 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None):
 
 
 # ------------------------------------------------------------ 流体 ----
-# 类原版流体几何（对照 MC 1.21.1 FluidRenderer）：
-#   单列高度: 同种流体时「上方仍是同种流体 ? 1.0 : level/9」（水源 level=0 记 8/9）；
-#             非同种流体时固体忽略（-1）、其余按 0.0 参与平均。
-#   四角高度: 加权平均（高度 >= 0.8 权重 10，否则权重 1）；两个正交邻居任一
-#              >= 1.0 时直接取 1.0；对角邻居仅在正交邻居 > 0 时参与。
+# 类原版流体几何（对照 MC 1.21.1 FluidRenderer，逐指令核对 javap 反汇编）：
+#   单列高度 h: 同种流体时「上方仍是同种流体 ? 1.0 : getHeight()」（getHeight = 流体 level/9，
+#               水源 8/9；注意方块状态 level 与流体 level 相反，见 _fluid_height）；
+#               非同种流体时「solid ? -1 : 0」，-1 权重为 0。
+#   四角高度（getFluidHeight + calculateFluidHeight）:
+#     ① 本列 h >= 1.0（上方是同种流体，整列满格）-> 四角直接 1.0，**不参与加权平均**；
+#     ② 否则两个正交邻居任一 >= 1.0 -> 四角 1.0；
+#     ③ 否则加权平均：本列必参与，两个正交邻居必参与，对角邻居仅在正交邻居任一 > 0 时
+#        参与；权重 = 高度 >= 0.8 ? 10 : 1（高度 < 0 不参与）；对角块高度 >= 1.0 时直接 1.0。
 # 仅本地网格路径（存档模式 / 模式 A）支持：服务端 MCM1 顶点是整型块坐标，
 # 表示不了流体高度，因此默认关闭（fluids=True 才启用）。
+# isSolid()（原版按碰撞箱判定，与"是否遮挡"不同）：树叶虽有 CUTOUT 渲染层但碰撞箱满格，
+# 故与水面的四角平滑中视为实心（-1），否则水边会被反常地拉低。
 _FLUID_SOLID = (B.OPAQUE, B.TRANSPARENT, B.NONCUBE)
 
 
 def _fluid_height(name):
-    """方块状态名 -> 单列流体高度（方块单位）。水源 level=0 -> 8/9。"""
+    """方块状态名 -> 单列流体高度（方块单位）。
+
+    **方块状态的 level 与流体 level 相反**（MC 1.21.1 FluidBlock.statesByLevel =
+    [getStill(), getFlowing(8-1), …, getFlowing(8-7), getFlowing(8, falling)]，
+    且 FlowableFluid.getBlockStateLevel = 8 - getLevel()）：
+
+      level=0 -> 静止水源（流体 level 8）-> 8/9
+      level=N（1..7）-> 流体 level 8-N：1 最靠近水源最厚（7/9）… 7 最远最薄（1/9）
+      level=8 -> 下落水（流体 level 8）-> 8/9
+
+    高度 = 流体 level / 9（FlowableFluid.getHeight）。按方块 level 原样取 level/9 会把
+    水面坡度整个反过来（远处反而更高），与游戏观感相反。"""
     lvl = 8
     if "[level=" in name:
         try:
             v = int(name.split("[level=", 1)[1].split("]", 1)[0].split(",")[0])
         except ValueError:
             v = 0
-        lvl = 8 if v == 0 else max(1, min(8, v))
+        lvl = 8 if (v == 0 or v >= 8) else 8 - v
     return lvl / 9.0
 
 
@@ -509,7 +526,7 @@ def _fluid_quads(cls, gid, palette):
     base_of = {}
     for i, (c, name) in enumerate(palette):
         is_liq[i] = (c == B.LIQUID)
-        is_solid[i] = c in _FLUID_SOLID
+        is_solid[i] = (c in _FLUID_SOLID) or (c == B.CUTOUT and "leaves" in name)
         frac[i] = _fluid_height(name)
         b = B.base_name(name)
         if b not in base_of:
@@ -528,11 +545,23 @@ def _fluid_quads(cls, gid, palette):
                  np.where(sol, -1.0, 0.0)).astype(np.float32)
 
     own = h[1:17, 1:H + 1, 1:17]
+    liq_c = liq[1:17, 1:H + 1, 1:17]
+    bid_c = bid[1:17, 1:H + 1, 1:17]
+
+    def _nb(sx, sz):
+        """邻居列高度。
+
+        原版邻居高度 = getFluidHeight(world, **当前渲染的流体**, 邻居pos)：邻居必须是
+        「与当前渲染流体同种」才按流体高度计入，否则走 solid ? -1 : 0 —— 水/岩浆相邻时
+        彼此按 0 处理，不能直接借用邻居自己的列高度。"""
+        sl = (slice(1 + sx, 17 + sx), slice(1, H + 1), slice(1 + sz, 17 + sz))
+        return np.where(liq[sl] & (bid[sl] != bid_c), 0.0, h[sl])
+
     corners = {}
     for dx, dz in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
-        ax = h[1 + dx:17 + dx, 1:H + 1, 1:17]
-        bz = h[1:17, 1:H + 1, 1 + dz:17 + dz]
-        dg = h[1 + dx:17 + dx, 1:H + 1, 1 + dz:17 + dz]
+        ax = _nb(dx, 0)
+        bz = _nb(0, dz)
+        dg = _nb(dx, dz)
         big = (ax >= 1.0) | (bz >= 1.0)
         diag_ok = (ax > 0.0) | (bz > 0.0)
         s = np.zeros_like(own)
@@ -546,11 +575,13 @@ def _fluid_quads(cls, gid, palette):
                 wt = np.where(inc, wt, 0.0)
             s = s + c
             w = w + wt
-        corners[(dx, dz)] = np.where(big | (diag_ok & (dg >= 1.0)), 1.0,
+        # ① 本列满格（上方同种流体）时原版直接返回 1.0：瀑布/多层水体的侧面必须
+        #    是整格竖直面，若参与平均会收到 0.83 而出现锯齿状斜边。
+        full = own >= 1.0
+        corners[(dx, dz)] = np.where(full | big | (diag_ok & (dg >= 1.0)), 1.0,
                                      s / np.maximum(w, 1e-6))
 
     opa = (cls == B.OPAQUE)
-    liq_c = liq[1:17, 1:H + 1, 1:17]
     out = []
 
     def _blk(i, j, k):
@@ -609,7 +640,9 @@ def mesh_payload(payloads, center=(0, 0), with_ao=True, leaves_fast=False,
                  pack=None, fluids=False):
     """3×3 payload 字典 -> (quads, palette, y_bottom, models)。
 
-    fluids=True 时把液体的整方块面换成类原版流体几何（见上）。"""
+    fluids=True 时把液体的整方块面换成类原版流体几何（见上），并剔除资产包为
+    液体注入的整方块烘焙模型（use_model 按模型占空比判定、与 class 无关，
+    水/岩浆会命中），否则整方块与流体几何会在同一格重叠。"""
     cls, gid, H, pal = assemble_padded(payloads, center)
     # 交叉面片: CUTOUT 且非树叶（与 Java 侧 BlockClassifier 规则一致）
     cross = np.zeros(len(pal), bool)
@@ -621,6 +654,9 @@ def mesh_payload(payloads, center=(0, 0), with_ao=True, leaves_fast=False,
         liq_ids = {i for i, (c, _) in enumerate(pal) if c == B.LIQUID}
         if liq_ids:
             quads = [q for q in quads if int(q[2]) not in liq_ids]
+            # 资产包对液体也会注入整方块烘焙模型（use_model 只看模型占空比，
+            # 与 class 无关）——必须一并剔除，否则与流体几何在同一格重叠
+            models = [m for m in models if int(m[6]) not in liq_ids]
             quads.extend(_fluid_quads(cls, gid, pal))
     return quads, pal, None, models
 
