@@ -60,7 +60,11 @@ N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
 - 顶点色 = 逐面染色（草顶染绿等）× AO；
 - 非整立方体方块按 `facing/half/shape` 等状态注入烘焙模型几何（真实 UV + cullface）；
 - 控制模式 LOD0（近处）自动走本地网格以注入模型，LOD1/2 仍用服务端网格保吞吐；
-  「烘焙模型」开关可关闭。
+  「烘焙模型」开关可关闭；
+- **实体**（画 / 盔甲架，存档模式 + 控制模式）：资产包 v4 画变体表 +
+  v5 实体模型段（分层，`tools/be_models/DumpEntityModels.java` 从客户端 jar 导出），
+  画按 `painting_variant` 尺寸/贴图渲染成平面四边形，盔甲架按实体 `Pose`
+  运行时装配原版几何，均并入所在区块对象（控制模式经模组 `GET /api/entities`）。
 
 > 方块实体（箱子/床/告示牌/旗帜/潜影盒/头颅/装饰陶罐/传送门框架/钟等）没有
 > JSON 几何（由 Java 渲染器绘制），改用**从客户端 jar 提取的原版模型**：
@@ -84,7 +88,7 @@ N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
 | `blender_addon/mc_bridge/` | Blender 插件（bpy 层 + 纯 Python 核心） | ✅ 已实现并测试 |
 | `server_sim/` | MC 模拟服务器（无 MC 环境的开发/测试替身，与模组 API 同构） | ✅ 已实现并测试 |
 | `mcmod/` | Fabric 服务端模组（Java） | ✅ 源码完整；纯 Java 部分已与 Python 逐字节对拍 |
-| `tests/` | 95 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
+| `tests/` | 122 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
 | `docs/` | 设计方案 / 协议规范 / 用户手册 / 路线图 / 预览图 | ✅ |
 | `tools/` | 资产烘焙、夹具生成、预览导出、Java 合并验证脚本 | ✅ |
 
@@ -115,11 +119,11 @@ python3 server_sim/mc_server_sim.py --port 8788
 
 ```bash
 # 1. 构建模组（需 JDK 17+ 与网络）
-cd mcmod && gradle build  # 需 Gradle 8+（或用 IDE 打开 mcmod 执行）
-# 产物: build/libs/mcbridge-1.0.0.jar
+cd mcmod && gradle build  # 需 Gradle 8.14+（或用 IDE 打开 mcmod 执行）
+# 产物: build/libs/mcbridge-1.3.0.jar
 
 # 2. 服务端安装（推荐独立服务端，无暂停问题；单人模式请"对局域网开放"）
-cp mcbridge-1.0.0.jar <服务端>/mods/
+cp mcbridge-1.3.0.jar <服务端>/mods/
 # 启动服务端，确认日志: "MC Bridge API 已启动: http://127.0.0.1:8788"
 
 # 3. Blender 插件连接 127.0.0.1:8788（默认端口）
@@ -128,7 +132,7 @@ cp mcbridge-1.0.0.jar <服务端>/mods/
 ## 测试
 
 ```bash
-# Python 全量（95 项：编解码/网格器/调度器/存档解析/插件冒烟/端到端/原版对拍）
+# Python 全量（122 项：编解码/网格器/调度器/存档解析/实体与画/插件冒烟/端到端/原版对拍）
 python3 -m pytest tests/
 
 # 跨语言一致性（Java vs Python 夹具逐字节对拍，仅需 JRE）
@@ -160,10 +164,14 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
   实测单区块减面 60–95%；AO 以顶点色×贴图节点接入 EEVEE/Cycles。
 - **UV 平铺**：贪心合并的大四边形用「块单位 UV + 贴图 Repeat」，
   每方块独立材质——正确性与减面兼得。
+- **区块组（跨区块合并）**：调度/装卸/版本的最小单位是 2×2 区块组（可调 1/2/4），
+  本地网格路径把整组拼成一个填充体积、贪心矩形可跨区块边界（`r_load=4` 时
+  对象数 49 → 17 → 8，见 [docs/设计方案.md](docs/设计方案.md) §5.8）。
 - **调度**：加载/卸载双环迟滞（防镜头抖动反复装卸）、距离优先队列、
   每帧限量应用、区块版本号低频轮询（控制模式游戏内边改边预览）。
 - **存档解析**：NBT 大端解析 + Region 扇区惰性读取 + 调色板位压缩向量化解码，
-  区块 payload 与网格产物双 LRU。
+  区块 payload 与网格产物双 LRU；实体区域文件（`entities/*.mca`）同源解析，
+  画按 NBT 生成平面四边形并入区块对象。
 - **确定性渲染**：预热模式（遍历帧范围收集区块并集）与烘焙静态化
   （导出 .blend 库，兼容无 MC 的渲染农场）。
 - **一致性**：Python 参考实现 ↔ Java 实现 通过夹具逐字节对拍；
@@ -173,7 +181,12 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
 
 - 资产包覆盖**所有传入 jar 的命名空间**（原版 + 模组）：把 `mods/*.jar`
   一并烘焙即可获得模组方块的真实贴图与 JSON 模型；未传入的模组方块仍回退为
-  完整方块近似。动态 BlockState/BakedModel（代码模型，非 JSON）同样回退近似。
+  完整方块近似。动态 BlockState/BakedModel（代码模型，非 JSON）同样回退近似，
+  烘焙结束会列出这些"近似几何"方块。判定不准的方块可用
+  `tools/mcbridge-classes.json`（`--classes`）手工标注 class / use_model / 贴图，
+  动态代码模型给出贴图后即可正常烘焙。
+- 方块的 class / 染色掩码 / 模型注入 / 默认面按**方块状态**解析（资产包 v3）：
+  `oak_slab[type=double]` 不再被当成半砖注入模型，`snowy` 草方块用雪顶贴图。
 - 无资产包时非完整方块（楼梯/栅栏等）按完整方块近似，贴图为程序化色块。
 - 流体（水/岩浆）在**本地网格路径**（存档模式、`mode=raw`）按原版方式渲染：
   水面高度 = 流体 level/9（水源 8/9；**方块状态 `level` 与流体 level 相反**——
@@ -185,7 +198,14 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
   注：岩浆的液体分类来自资产包（`bake_assets` 的 `water/lava` 启发式）；
   未加载资产包时共享小表只收录水，岩浆会退回不透明整方块。淡水体（海/湖/含水层）
   与含水方块不受此限。
-- 实体/方块实体不在范围内。
+- 实体渲染**画与盔甲架**（存档模式 + 控制模式）。画的落位按
+  `Pos` = 画面底边中点、沿 `facing` 外移 1/32，**未与原版逐块对拍**
+  （`tools/paintings_report.py` 出对拍报告，见 [docs/roadmap.md](docs/roadmap.md) R5）；
+  盔甲架的 Pose 装配与部件显隐已对照原版反汇编实现，但**整体落位**
+  （Small 缩放 / 全局朝向 / 底边对齐）属近似，且未在真实游戏画面核对；
+  控制模式实体需新版模组（`/api/ping` 声明 `entities:true`）并经真实游戏验证。
+  方块实体（箱子/床/告示牌/…）已用原版几何渲染。
+  详见 [docs/roadmap.md](docs/roadmap.md) R5。
 - 存档模式只读（不能像控制模式那样把玩家传送到相机位置）；
   自定义数据包维度需手动适配 ymin/height。
 - MC 模组按 Yarn 1.20.1 编写： Mixin 注入失败不影响启动（版本追踪退化为不可用）；
@@ -193,5 +213,5 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
 
 ## 未来规划
 
-见 [docs/roadmap.md](docs/roadmap.md)（R1 高度轴分区块、R3 模组资产烘焙、
-R4 跨区块合并、R5 实体、R6 渲染增强、R7 生态）。
+见 [docs/roadmap.md](docs/roadmap.md)（R6 渲染增强、R7 生态、R8 群系染色；
+R4 跨区块合并与 R5 实体已完成/部分完成，逐条记录见该文档）。

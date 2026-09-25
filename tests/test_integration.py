@@ -96,6 +96,18 @@ class TestIntegration(unittest.TestCase):
         names = [n for _, n in m["palette"]]
         self.assertIn("minecraft:glass", names)
 
+    def test_entities_endpoint(self):
+        """R5 控制模式：/api/entities（server_sim 注入实体）端到端解析。"""
+        self.world.set_entity(0, 0, {"id": "minecraft:painting", "Pos": [8.5, 70.0, 8.0],
+                                     "facing": 0, "variant": "minecraft:kebab"})
+        ents = self.client.entities("overworld", 0, 0)
+        self.assertEqual(len(ents), 1)
+        self.assertEqual(ents[0]["id"], "minecraft:painting")
+        self.assertEqual(ents[0]["variant"], "minecraft:kebab")
+        self.assertEqual(ents[0]["facing"], 0)
+        # 无实体的区块 -> 空列表
+        self.assertEqual(self.client.entities("overworld", 3, 3), [])
+
     def test_lod1_lod2(self):
         m1 = self.client.mesh("overworld", 0, 0, -64, 320, lod=1)
         m2 = self.client.mesh("overworld", 0, 0, -64, 320, lod=2)

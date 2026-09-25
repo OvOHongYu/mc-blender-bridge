@@ -225,7 +225,8 @@ public final class GreedyMesher {
         }
     }
 
-    /** 交叉面片植物: 对角双面片 × 正反绕序 = 4 面，dir=0(+X)->side 贴图，AO 恒满。 */
+    /** 交叉面片植物: 对角两个面片，dir=0(+X)->side 贴图，AO 恒满。
+     *  只发射一次——消费端（Blender）默认双面渲染；再补反向绕序会与之共面重叠。 */
     private static void emitCrosses(List<Quad> quads, byte[][][] cls,
                                     short[][][] gid, boolean[] cross) {
         if (cross == null) {
@@ -251,10 +252,6 @@ public final class GreedyMesher {
                             bx + 1, by + 1, bz, bx, by + 1, bz + 1};
                     for (int[] v : new int[][]{a, b}) {
                         quads.add(new Quad(toShorts(v), (short) 0, (short) g,
-                                new int[]{3, 3, 3, 3}));
-                        int[] r = {v[0], v[1], v[2], v[9], v[10], v[11],
-                                v[6], v[7], v[8], v[3], v[4], v[5]};
-                        quads.add(new Quad(toShorts(r), (short) 0, (short) g,
                                 new int[]{3, 3, 3, 3}));
                     }
                 }

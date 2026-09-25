@@ -4,18 +4,23 @@
 由 tools/bake_assets.py 生成，包含：
   - 贴图表（名称 -> RGBA 像素）
   - 烘焙变体（blockstate 变换后的四边形流，方块局部 0..16 坐标）
+  - 变体级方块信息（v3：class / 染色掩码 / use_model / 默认面），
+    使 slab 的 double 与 bottom 等不同状态各拿自己的分类与贴图
   - 方块状态表（属性 -> 变体索引）
   - 默认面贴图（方块 -> top/side/bottom 贴图 id，供完整方块材质管线）
+  - 画变体表（v4：变体名 -> 宽/高/画面贴图 id，供存档模式实体渲染）
 
 线程安全：加载后所有数据只读，可多线程共享。
 """
+import json
 import struct
 import zlib
 
 MAGIC = b"MCBA1"
-VERSION = 2                  # v1 顶点为 1/16 方块单位；v2 为 1/256（亚像素）
-_SUPPORTED = (1, 2)
+VERSION = 5                  # 当前格式版本（读取端兼容 v1..v5）
+_SUPPORTED = (1, 2, 3, 4, 5)
 _V2_SCALE = 16.0             # v2 顶点 -> 1/16 方块单位
+_NONE_TEX = 0xFFFF           # 变体级信息里"该面无贴图"的哨兵
 
 # quad = (verts tuple[(x,y,z)]*4, dir u8, tex u16, tint i8, cull u8, uvs tuple[(u,v)]*4)
 
@@ -28,11 +33,14 @@ class AssetPack:
         self.tex_rgba = []
         self._tex_by_name = {}
         self.variants = []
+        self.variant_info = []      # 变体级 (class, tintMask, useModel, top, side, bottom)
         self.blockstates = {}       # name -> (mode, rules)
         self.block_faces = {}       # name -> (top, side, bottom)
         self.block_classes = {}     # name -> class u8
         self.block_tints = {}       # name -> 染色位掩码（bit0 top / bit1 bottom / bit2 side）
         self.block_use_model = {}   # name -> 1 表示应注入烘焙模型几何
+        self.paintings = {}         # 画变体名 -> (w, h, tex_id)（v4 起；R5）
+        self.entity_models = {}     # 实体模型名 -> {"texW","texH","tex","parts"}（v5；R5）
         self._png_cache = {}
 
     # ------------------------------------------------------------ 加载 ----
@@ -91,6 +99,15 @@ class AssetPack:
                        (uv[4], uv[5]), (uv[6], uv[7]))
                 quads.append((verts, d, tex, tint, cull, uvs))
             self.variants.append(quads)
+            if ver >= 3:
+                cls, mask, use_model, top, side, bottom = struct.unpack_from(
+                    "<BBBHHH", buf, off)
+                off += 9
+                self.variant_info.append(
+                    (int(cls), int(mask), int(use_model), _tex_or_none(top),
+                     _tex_or_none(side), _tex_or_none(bottom)))
+            else:
+                self.variant_info.append(None)
 
         (nb,) = struct.unpack_from("<I", buf, off)
         off += 4
@@ -125,6 +142,27 @@ class AssetPack:
             self.block_classes[name] = int(cls)
             self.block_tints[name] = int(mask)
             self.block_use_model[name] = int(use_model)
+
+        if ver >= 4:
+            # 画变体表（1.21+ painting_variant）：宽 / 高 / 画面贴图 id
+            (npaint,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            for _ in range(npaint):
+                name, off = _rstr(buf, off)
+                w, h, tex = struct.unpack_from("<HHH", buf, off)
+                off += 6
+                self.paintings[name] = (int(w), int(h), _tex_or_none(tex))
+
+        if ver >= 5:
+            # 实体模型段（分层实体模型，整体 JSON；R5 盔甲架等）
+            (nem,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            for _ in range(nem):
+                name, off = _rstr(buf, off)
+                (ln,) = struct.unpack_from("<I", buf, off)
+                off += 4
+                self.entity_models[name] = json.loads(buf[off:off + ln].decode("utf-8"))
+                off += ln
         assert off == len(buf), "MCBA1 trailing bytes: %d" % (len(buf) - off)
         return self
 
@@ -158,20 +196,43 @@ class AssetPack:
         return png
 
     def default_faces(self, block):
-        """(top, side, bottom) 贴图 id 或 None。"""
-        return self.block_faces.get(block)
+        """(top, side, bottom) 贴图 id 或 None。传入方块状态名时按其状态解析。"""
+        info = self._state_info(block)
+        if info is not None:
+            return (info[3], info[4], info[5])
+        return _block_lookup(self.block_faces, block)
 
     def classify(self, block):
-        """烘焙期推断的方块分类（无则 None）。"""
-        return self.block_classes.get(block)
+        """烘焙期推断的方块分类（无则 None）。传入方块状态名时按其状态解析。"""
+        info = self._state_info(block)
+        return info[0] if info is not None else _block_lookup(self.block_classes, block)
 
     def tint_mask(self, block):
         """染色位掩码（bit0 top / bit1 bottom / bit2 side）；无则 None。"""
-        return self.block_tints.get(block)
+        info = self._state_info(block)
+        return info[1] if info is not None else _block_lookup(self.block_tints, block)
 
     def use_model(self, block):
         """该方块是否应注入烘焙模型几何（非简单整立方体）。"""
-        return bool(self.block_use_model.get(block, 0))
+        info = self._state_info(block)
+        if info is not None:
+            return bool(info[2])
+        return bool(_block_lookup(self.block_use_model, block))
+
+    def _state_info(self, name):
+        """方块状态名 -> 变体级信息；无按状态结果时返回 None。
+
+        传 'ns:block[props]' 时用 blockstates 规则解析出该状态对应的变体，
+        从而拿到该状态自己的 class/掩码/use_model/默认面（v3 包才有效）；
+        传基础名或规则未命中时返回 None，调用方退回方块级信息。"""
+        if not self.variant_info:
+            return None
+        block, props = _split_state(name)
+        for vi in self.variant_indices(block, props):
+            info = self.variant_info[vi] if vi < len(self.variant_info) else None
+            if info is not None and info[3] is not None:   # 有默认面 = 有几何
+                return info
+        return None
 
     def variant_indices(self, block, props=None):
         """返回适用的变体索引列表（按方块状态属性匹配）。"""
@@ -194,6 +255,35 @@ class AssetPack:
 
     def has_models(self, block):
         return block in self.blockstates
+
+
+def _tex_or_none(t):
+    """0xFFFF 哨兵 -> None（该面无烘焙贴图）。"""
+    return None if t == _NONE_TEX else int(t)
+
+
+def _block_lookup(table, name):
+    """方块级信息查表：先按全名（含属性）查，再退回基础名。
+
+    存档/服务端传来的都是带属性的方块状态名，而 v3 前（或 blockstates 未收录）
+    的包只有方块级条目，字典键是基础名——不退回基础名会导致整块贴图与模型丢失。"""
+    v = table.get(name)
+    if v is None:
+        v = table.get(name.split("[", 1)[0])
+    return v
+
+
+def _split_state(name):
+    """'ns:block[a=1,b=2]' -> ('ns:block', {'a': '1', 'b': '2'})。"""
+    i = name.find("[")
+    if i < 0:
+        return name, {}
+    props = {}
+    for kv in name[i + 1:].rstrip("]").split(","):
+        k, sep, v = kv.partition("=")
+        if sep:
+            props[k.strip()] = v.strip()
+    return name[:i], props
 
 
 def _rstr(buf, off):

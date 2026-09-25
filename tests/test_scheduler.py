@@ -89,7 +89,7 @@ class TestScheduler(unittest.TestCase):
         sch.stop()
 
     def test_priority_order(self):
-        """近处区块应先于远处就绪。"""
+        """近处区块组应先于远处就绪。"""
         sch = self._scheduler(r_load=2, r_unload=3, inflight=1)
         order = []
         orig = sch.poll_apply
@@ -103,11 +103,41 @@ class TestScheduler(unittest.TestCase):
         sch.update_anchor(8.0, 8.0)
         imp = FakeImporter()
         self.assertTrue(imp.apply(sch))
-        d = lambda k: math.hypot(k[1], k[2])
-        # 单线程串行: 应按距离近似升序
+        G = sch.p.group
+
+        def d(k):
+            """组的调度距离 = 组内最近区块到锚点（锚点区块 (0,0)）。"""
+            gx, gz = k[1], k[2]
+            return math.hypot(max(gx, -gx - G + 1, 0), max(gz, -gz - G + 1, 0))
+
+        # 单线程串行: 应按组的调度距离近似升序
         dists = [d(k) for k in order]
         self.assertEqual(dists, sorted(dists))
         sch.stop()
+
+    def test_group_reduces_objects(self):
+        """R4：区块组把对象数成倍减少，且几何覆盖整组范围。
+
+        组按绝对区块坐标对齐，锚点附近必然有"只用到 1~2 个区块"的边界组，
+        故收益低于理论 group²（r_load=4 实测 49 -> 17，约 2.9 倍）。"""
+        counts = {}
+        for g in (1, 2, 4):
+            sch = self._scheduler(r_load=4, r_unload=5, mode="raw", group=g)
+            imp = FakeImporter()
+            sch.update_anchor(8.0, 8.0)
+            self.assertTrue(imp.apply(sch))
+            counts[g] = len(imp.objects)
+            for key in imp.objects:
+                self.assertEqual(key[1] % g, 0)
+                self.assertEqual(key[2] % g, 0)
+            if g > 1:
+                geo = imp.objects[("overworld", 0, 0)]["geo"]
+                # 组局部坐标：顶点跨到组内最后一个区块（x/z 最大 16*group）
+                self.assertAlmostEqual(float(geo["verts"][:, 0].max()), 16.0 * g)
+                self.assertAlmostEqual(float(geo["verts"][:, 2].max()), 16.0 * g)
+            sch.stop()
+        self.assertGreater(counts[1], counts[2] * 2, counts)
+        self.assertGreater(counts[2], counts[4] * 1.5, counts)
 
     def test_version_reload(self):
         sch = self._scheduler()

@@ -102,10 +102,16 @@ class World:
         self.seed = seed
         self.chunks = {}          # (cx,cz) -> list[None | ndarray(4096) uint16 全局id]
         self.versions = {}        # (cx,cz) -> u64
+        self.entities = {}        # (cx,cz) -> [实体 dict]（R5 控制模式）
         self.lock = threading.Lock()
         from collections import OrderedDict
         self._mesh_cache = OrderedDict()
         self._mesh_lock = threading.Lock()
+
+    def set_entity(self, cx, cz, ent):
+        """测试/演示用：向区块注入一个实体（id/Pos/facing/variant/Pose…）。"""
+        with self.lock:
+            self.entities.setdefault((cx, cz), []).append(dict(ent))
 
     # ------------------------------------------------------- 生成 ----
 
@@ -402,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/ping":
                 self._json({"mod": "mcbridge-sim", "modVersion": "1.0.0",
                             "mcVersion": "sim", "encodings": [2],
-                            "modes": ["raw", "mesh"],
+                            "modes": ["raw", "mesh"], "entities": True,
                             "dims": [{"id": DIM, "minY": WORLD_MIN_Y,
                                       "height": WORLD_HEIGHT}],
                             "maxQuads": 200000})
@@ -424,6 +430,9 @@ class Handler(BaseHTTPRequestHandler):
                 m = codec.encode_mcm1(DIM, int(q["cx"]), int(q["cz"]), r["yBottom"],
                                       r["pal"], r["quads"], with_ao=lod != 2)
                 self._binary(m)
+            elif u.path == "/api/entities":
+                ents = self.world.entities.get((int(q["cx"]), int(q["cz"])), [])
+                self._json({"entities": ents})
             elif u.path == "/api/versions":
                 items = []
                 for cx in range(int(q["cx0"]), int(q["cx1"]) + 1):

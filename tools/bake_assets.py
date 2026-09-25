@@ -6,25 +6,53 @@
   python tools/bake_assets.py <client.jar|resourcepack.zip|mod.jar> [...] -o dist/assets.mcba
     --mc-version 1.21.1     写入包的版本标记
     --only oak_stairs,...   只烘焙指定方块（调试用，可带命名空间）
+    --classes <path>        手工分类标注表（JSON）；未指定时取脚本目录下的
+                            mcbridge-classes.json（存在才加载）
 
 模组方块：把 mods/*.jar 一并作为输入即可（自动扫描其 assets/<ns>/ 下资源）。
   通配符由本脚本自己展开，因此在 PowerShell / cmd（不会替原生命令展开 *）下
   同样可用：python tools/bake_assets.py client.jar "mods/*.jar" -o dist/assets.mcba
+
+手工分类标注表（mcbridge-classes.json）：对启发式判定不准或无 JSON 模型的方块
+  （多为模组方块）手工指定 class / use_model / 贴图：
+    {"mymod:weird_glass": "transparent",          # 紧凑写法：只覆盖 class
+     "mymod:barrel": {"class": "noncube", "use_model": 0},
+     "mymod:lamp": {"tex": {"top": "mymod:block/lamp_top",
+                            "side": "mymod:block/lamp"}}}
+  class = 类名或 0..5；use_model = true/false 或 0/1；tex = 贴图名（字符串表示
+  六面相同）。无 JSON 模型的方块只有在给出 tex 时才能成条目（合成整立方体兜底）。
+  未生效的条目在烘焙结束时告警。共享分类表（core/blocks.py）内的原版方块优先。
 
 方块实体（箱子/床/告示牌/旗帜/潜影盒/头颅/陶罐/传送门框架/钟…）没有 JSON 几何，
 其原版形状取自 tools/vanilla_be_models.json —— 由 tools/dump_be_models.ps1 从客户端
 jar 直接调用原版模型工厂导出（缺失时退回简化代理模型）。换 MC 版本后需重跑该脚本。
 
 输出 MCBA1（小端）:
-  magic "MCBA1" | ver u8 = 2 | mcVersion str
+  magic "MCBA1" | ver u8 = 5 | mcVersion str
   --- 贴图 ---  nTex u32；每项: name str | w u16 | h u16 | len u32 | RGBA 字节
   --- 变体 ---  nVar u32；每项: nQuads u16；
                 每 quad: 12×i16 顶点 | dir u8 | tex u16 | tint i8 | cull u8 | 8×f32 UV
+                变体级信息: class u8 | tintMask u8 | useModel u8
+                           | top u16 | side u16 | bottom u16（0xFFFF = 无）
   v2 顶点单位为 1/256 方块（= 1/16 像素），模组模型（Blockbench 常用 0.25/0.5
-  像素等亚像素坐标）不再被取整压扁；读取端 v1/v2 均兼容。
+  像素等亚像素坐标）不再被取整压扁；读取端 v1..v5 均兼容。
+  v3 把 class/tintMask/useModel/默认面从"方块级"下沉到"变体级"：blockstate
+  的不同状态各自解析到自己的变体，因此 slab 的 double 与 bottom、snowy 草方块
+  等能拿到各自正确的分类与贴图（块级信息保留为兜底）。
+  v4 新增**画变体表**（1.21+ 数据驱动 painting_variant）：
+  --- 画 --- nPainting u32；每项: name str | w u16 | h u16 | tex u16
+                （tex = 画面贴图 id；无该表的旧包读取端按"无画"处理）
+  v5 新增**实体模型段**（运行时装配的**分层**实体模型，如盔甲架——部件旋转
+  Pose 是运行时任意角度，必须保留每个部件的 pivot / 默认旋转 / 本地顶点）：
+  --- 实体模型 --- nEntityModel u32；每项: name str | jsonLen u32 | JSON UTF-8
+                JSON = {"texW","texH","tex":"<贴图名>","parts":[分层部件树]}，
+                顶点为部件局部坐标（1/16 方块单位，以该部件 pivot 为原点）。
   --- 方块状态 --- nBlock u32；每项: name str | mode u8 | nRules u16；
                 每 rule: nPairs u8；(key str, val str)×nPairs | variant u16
-  --- 默认面贴图 --- nBlockTex u32；每项: name str | top u16 | side u16 | bottom u16
+  --- 方块信息 --- nBlockTex u32；每项: name str | class u8 | tintMask u8
+                | useModel u8 | top u16 | side u16 | bottom u16
+                （tintMask bit0=top bit1=bottom bit2=side；useModel=1 表示应
+                  注入烘焙模型几何而非整方块近似）
 
 依赖: Pillow（`pip install pillow`）。工具仅构建期使用，不随插件分发。
 """
@@ -44,12 +72,18 @@ except ImportError:                                  # pragma: no cover
     Image = None
 
 MAGIC = b"MCBA1"
-VERSION = 2                    # v1: 顶点 1/16 方块单位；v2: 1/256（保留亚像素精度）
+VERSION = 5                    # v1: 顶点 1/16；v2: 1/256（亚像素）；v3: 变体级方块信息；
+                               # v4: 画变体表；v5: 实体模型段（分层，运行时装配）
 _VERT_SCALE = 16               # v2 写入倍数：1/16 单位 × 16 = 1/256 方块单位
 _I16_MIN, _I16_MAX = -32768, 32767
 
-# 烘焙期统计（诊断「导出失效」：贴图缺失会让面被丢弃）
-_STATS = {"faces": 0, "tex_miss": 0}
+# 烘焙期统计（诊断「导出失效」：贴图缺失会让面被丢弃；近似几何方块另出清单）
+_STATS = {"faces": 0, "tex_miss": 0, "approx_blocks": []}
+
+
+def _reset_stats():
+    _STATS["faces"] = _STATS["tex_miss"] = 0
+    del _STATS["approx_blocks"][:]
 
 # 面方向编码（与 core/mesher.py 一致）: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z
 FACE_DIR = {"east": 0, "west": 1, "up": 2, "down": 3, "south": 4, "north": 5}
@@ -57,6 +91,10 @@ DIR_VEC = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
 # 方块分类（与 core/blocks.py 一致）
 AIR, OPAQUE, TRANSPARENT, LIQUID, CUTOUT, NONCUBE = 0, 1, 2, 3, 4, 5
+
+# 手工标注表里可用的类名（大小写不敏感）
+_CLASS_NAMES = {"air": AIR, "opaque": OPAQUE, "transparent": TRANSPARENT,
+                "liquid": LIQUID, "cutout": CUTOUT, "noncube": NONCUBE}
 
 _LIQUID_HINT = ("water", "lava")
 _TRANSPARENT_HINT = ("glass", "ice", "pane", "portal", "beacon_beam")
@@ -106,14 +144,45 @@ class ResourcePack:
 
 
 # ------------------------------------------------------------ 贴图 ----
-def _decode_png(data):
-    """PNG -> (w, h, RGBA bytes)；动画条带只取第一帧。"""
+def _anim_frame_height(meta, w, h):
+    """从 .mcmeta 求动画单帧高度；无 animation 段或无法判定时返回 None。
+
+    帧高优先取显式 "height"（非方形帧的条带），否则按 frames 列表长度均分；
+    都没给则视为竖直方形条带（帧高 = 宽）。返回 h 表示"不是动画/只有一帧"。"""
+    if not meta:
+        return None
+    try:
+        obj = json.loads(meta.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    anim = obj.get("animation") if isinstance(obj, dict) else None
+    if not isinstance(anim, dict):
+        return None                              # 非动画（仅 mipmap/blur 等段）
+    fh = anim.get("height")
+    if isinstance(fh, int) and 0 < fh <= h:
+        return fh
+    frames = anim.get("frames")
+    if isinstance(frames, list) and frames and h % len(frames) == 0:
+        return h // len(frames)
+    return w if (w > 0 and h != w and h % w == 0) else h
+
+
+def _decode_png(data, meta=None, strip=True):
+    """PNG -> (w, h, RGBA bytes)；动画贴图只取首帧。
+
+    meta 为同名 .mcmeta 内容：声明了 animation 时按其帧高裁剪（权威），
+    否则退回"高度是宽度整数倍即条带"的尺寸启发式（兼容无 .mcmeta 的包）。
+    strip=False 关闭该启发式：画贴图是 16×宽 × 16×高（1×2 的画就是 16×32），
+    同样满足整数倍关系但不是动画，误裁会丢掉下半幅。"""
     img = Image.open(io.BytesIO(data))
     img = img.convert("RGBA")
     w, h = img.size
-    if h != w and w > 0 and h % w == 0:              # 动画条带：裁剪第一帧
-        img = img.crop((0, 0, w, w))
-        h = w
+    fh = _anim_frame_height(meta, w, h)
+    if fh is None and strip and h != w and w > 0 and h % w == 0:
+        fh = w                                   # 尺寸启发式：竖直动画条带
+    if fh is not None and 0 < fh < h:
+        img = img.crop((0, 0, w, fh))
+        h = fh
     return w, h, img.tobytes()
 
 
@@ -306,9 +375,11 @@ def build_model_quads(model, texid_of, xr=0, yr=0, uvlock=False):
                 continue
             uv = face.get("uv") or _default_uv(d, x0, y0, z0, x1, y1, z1, sx, sy)
             u1, v1, u2, v2 = (float(uv[0]), float(uv[1]), float(uv[2]), float(uv[3]))
-            if uvlock and (xr or yr):
-                u1, v1, u2, v2 = _uvlock_rect(u1, v1, u2, v2, xr, yr, d)
             frot = int(face.get("rotation", 0))
+            if uvlock and (xr or yr):
+                # 原版 uvLock 同时改矩形与"面的旋转索引"（索引决定角点↔矩形角对应）
+                (u1, v1, u2, v2), frot = _uvlock_rect(u1, v1, u2, v2, frot,
+                                                       xr, yr, d)
             corners = _face_corners(d, x0, y0, z0, x1, y1, z1)
             verts, uvs = [], []
             for p in corners:
@@ -323,6 +394,26 @@ def build_model_quads(model, texid_of, xr=0, yr=0, uvlock=False):
             cull = FACE_DIR.get(face.get("cullface"), -1)
             out.append((verts, d, texid, int(face.get("tintindex", -1)),
                         cull + 1, uvs))
+    return _dedupe_coincident(out)
+
+
+def _dedupe_coincident(quads):
+    """丢掉与原面共面同形、只差绕序的面片。
+
+    MC 的零厚度模型（`block/cross.json` 等）会给同一片"纸"正反两面各写一个 face
+    （如 north + south），两者顶点集合相同、绕序相反。原版渲染剔除背面，所以两面
+    各画一次是对的；Blender 默认双面渲染（材质未开背面剔除），两者会**共面重叠**
+    产生 Z-Fighting，只需留一个。同顶点集且贴图/染色一致才合并，避免误删。"""
+    seen = set()
+    out = []
+    for q in quads:
+        verts, _d, texid, tint, _cull, _uvs = q
+        key = (frozenset(tuple(round(c, 6) for c in v) for v in verts),
+               texid, tint)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
     return out
 
 
@@ -334,8 +425,8 @@ def apply_variant_transform(quads, xr, yr, uvlock):
     例如 chain 的 axis=x 用 x=90,y=90，up 轴先被 x 转到 -Z，再被 y 转到 +X；
     若反过来先 y 后 x，则仍停在 -Z（锁链横躺成南北向、末地烛朝向偏 90°，
     楼梯 half=top 的 x=180 与 y 组合也会整体错向）。
-    UV 已在 build_model_quads 归一化并按 Blender 约定翻转；uvlock 的
-    UV 锁定暂未实现（只影响贴图方向，不影响几何朝向）。"""
+    UV 已在 build_model_quads 归一化并按 Blender 约定翻转，uvlock 的 UV
+    锁定也在那里完成（本函数只转几何，不重复处理 UV）。"""
     if not xr and not yr:
         return quads
     out = []
@@ -400,35 +491,61 @@ def _rot_mat3(xr, yr):
 
 
 def _uvlock_mat(xr, yr, d):
-    """uvlock 的 3×3 变换矩阵（作用于 (u/16, v/16, 0)）。"""
+    """uvlock 的 3×3 线性部分（作用于 (u/16, v/16, 0)）。
+
+    M = T(0.5) · D(d) · R^-1 · D(d')^T · T(-0.5)（d' = R·d，绕 (0.5,0.5) 取心），
+    与 MC AffineTransformations.uvLock 逐元素一致（已用本体 96 组矩阵核对）。"""
     g = _rot_mat3(xr, yr)
     dv = _mat3_vec(g, DIR_VEC[d])
     d2 = _DIR_BY_VEC.get(tuple(int(round(c)) for c in dv), d)
-    return _mat3_mul(_mat3_mul(_D_DIR_MAT[_DIR_NAME[d2]], g),
-                     _mat3_t(_D_DIR_MAT[_DIR_NAME[d]]))
+    return _mat3_mul(_mat3_mul(_D_DIR_MAT[_DIR_NAME[d]], _mat3_t(g)),
+                     _mat3_t(_D_DIR_MAT[_DIR_NAME[d2]]))
 
 
-def _uvlock_rect(u1, v1, u2, v2, xr, yr, d):
-    """按 uvlock 变换 UV 矩形（0..16 单位），返回 (u1, v1, u2, v2)。
+def _uvlock_rect(u1, v1, u2, v2, frot, xr, yr, d):
+    """原版 BakedQuadFactory.uvLock：返回 (锁定后的 UV 矩形, 锁定后的 face rotation)。
 
-    与 MC BakedQuadFactory.uvLock 一致：变换两个对角点，方向翻转时交换。"""
+    与之前只锁矩形不同，原版会**一并改动面的 rotation**：角点 i 对应的矩形角是
+    (i + rot/90) % 4，因此 90°/270° 旋转下 u/v 轴互换——只锁矩形会让贴图转 90°。
+    取对角点时用 getDirectionIndex 选的矩形角，新 rotation 由 M 作用于
+    (cosθ, sinθ) 的 atan2 取整得到。已用本体 288 组 (x,y,面,矩形) 真值核对。"""
     m = _uvlock_mat(xr, yr, d)
+    # T(.5)·M·T(-.5) 的平移：c - M·c（c = 方块中心 0.5）
+    cx, cy, cz = 0.5, 0.5, 0.5
+    gx = m[0][0] * cx + m[0][1] * cy + m[0][2] * cz
+    gy = m[1][0] * cx + m[1][1] * cy + m[1][2] * cz
+    tx, ty = cx - gx, cy - gy
+    j0 = (frot // 90) % 4
+    j2 = (2 + frot // 90) % 4
+
+    def corner(j):
+        return (u1 if j in (0, 1) else u2), (v1 if j in (0, 3) else v2)
 
     def tp(u, v):
-        return (m[0][0] * (u / 16.0) + m[0][1] * (v / 16.0)) * 16.0, \
-               (m[1][0] * (u / 16.0) + m[1][1] * (v / 16.0)) * 16.0
+        return (m[0][0] * (u / 16.0) + m[0][1] * (v / 16.0) + tx) * 16.0, \
+               (m[1][0] * (u / 16.0) + m[1][1] * (v / 16.0) + ty) * 16.0
 
-    nu1, nv1 = tp(u1, v1)
-    nu2, nv2 = tp(u2, v2)
+    cu0, cv0 = corner(j0)
+    cu2, cv2 = corner(j2)
+    nu0, nv0 = tp(cu0, cv0)
+    nu2, nv2 = tp(cu2, cv2)
 
     def sgn(x):
         return (x > 0) - (x < 0)
 
-    if sgn(nu2 - nu1) != sgn(u2 - u1):
-        nu1, nu2 = nu2, nu1
-    if sgn(nv2 - nv1) != sgn(v2 - v1):
-        nv1, nv2 = nv2, nv1
-    return nu1, nv1, nu2, nv2
+    if sgn(nu2 - nu0) == sgn(cu2 - cu0):
+        ou1, ou2 = nu0, nu2
+    else:
+        ou1, ou2 = nu2, nu0
+    if sgn(nv2 - nv0) == sgn(cv2 - cv0):
+        ov1, ov2 = nv0, nv2
+    else:
+        ov1, ov2 = nv2, nv0
+    th = math.radians(frot)
+    vx = m[0][0] * math.cos(th) + m[0][1] * math.sin(th)
+    vy = m[1][0] * math.cos(th) + m[1][1] * math.sin(th)
+    newrot = int((-round(math.degrees(math.atan2(vy, vx)) / 90.0) * 90) % 360)
+    return (ou1, ov1, ou2, ov2), newrot
 
 
 def _rotate_dir(d, xr, yr):
@@ -528,6 +645,10 @@ _SKULL_TEX = {
     "dragon": "minecraft:entity/enderdragon/dragon",
     "piglin": "minecraft:entity/piglin/piglin",
     "player": "minecraft:entity/player/wide/steve",
+}
+# 分层实体模型（tools/vanilla_entity_models.json）的贴图（原版渲染器的 getTexture）
+_ENTITY_TEX = {
+    "armor_stand": "minecraft:entity/armorstand/wood",
 }
 
 
@@ -722,7 +843,11 @@ def _be_specs(block):
         tex = "minecraft:entity/bed/%s" % (color or "white")
         out = []
         for facing, rot in _AS_ROT.items():
-            ops = [("t", (0.0, 0.5625, -1.0)), ("r", 0, 90.0),
+            # 原版 renderPart 的 z 平移是 translate(0, 0.5625, isFoot ? -1.0 : 0)：
+            # **世界路径**（BedBlockEntityRenderer.render 的 getWorld() != null 分支）
+            # 每个半张床各画在自己那一格、isFoot 恒为 false，故无 z 平移；
+            # 只有 getWorld() == null（背包里同时画头脚两半）才用 -1.0 把另半推开一格。
+            ops = [("t", (0.0, 0.5625, 0.0)), ("r", 0, 90.0),
                    ("t", (0.5, 0.5, 0.5)), ("r", 2, 180.0 + rot),
                    ("t", (-0.5, -0.5, -0.5))]
             for part, mkey in (("head", "bed_head"), ("foot", "bed_foot")):
@@ -911,28 +1036,36 @@ def proxy_model(block, particle):
 
 
 class Baker:
-    def __init__(self, pack, mc_version, only=None):
+    def __init__(self, pack, mc_version, only=None, overrides=None):
         self.pack = pack
         self.mc_version = mc_version
         self.only = set(only) if only else None
+        self.overrides = dict(overrides or {})   # 手工分类标注：block -> class
+        self.overrides_applied = set()
         self.models = ModelLoader(pack)
         self.tex_ids = {}
         self.tex_blobs = []          # (name, w, h, rgba)
         self.variants = {}           # key (model,xr,yr,uvlock) -> idx
         self.be_variants = {}        # 原版方块实体：spec repr -> idx
         self.variant_list = []       # quads
+        self.variant_info = []       # (class, tintMask, useModel, top, side, bottom)
         self.blockstates = []        # (block, mode, rules)
         self.block_tex = []          # (block, top, side, bottom)
+        self.paintings = []          # (name, w, h, tex)（v4 画变体表）
+        self.entity_models = {}      # name -> {"texW","texH","tex","parts"}（v5）
 
     # -------------------------------------------------- 贴图 ----
-    def _ensure_texture(self, name):
+    def _ensure_texture(self, name, strip=True):
         if name in self.tex_ids:
             return self.tex_ids[name]
-        data = self.pack.read(tex_resource_path(name))
+        path = tex_resource_path(name)
+        data = self.pack.read(path)
         if data is None:
             return None
+        # 同名 .mcmeta：动画贴图按其帧高取首帧（见 _decode_png）
+        meta = self.pack.read(path + ".mcmeta")
         try:
-            w, h, rgba = _decode_png(data)
+            w, h, rgba = _decode_png(data, meta, strip)
         except Exception:
             return None
         idx = len(self.tex_blobs)
@@ -972,12 +1105,20 @@ class Baker:
         return None
 
     @staticmethod
-    def _cube_quads(texid):
-        """整立方体 6 面（UV 归一化到 0..1 并翻转为 Blender 约定）。"""
+    def _cube_quads(texid, tids=None):
+        """整立方体 6 面（UV 归一化到 0..1 并翻转为 Blender 约定）。
+
+        tids=(top, side, bottom) 时按面组取贴图（缺的面用其余面兜底）；
+        否则六面统一用 texid。"""
         x0 = y0 = z0 = 0.0
         x1 = y1 = z1 = 16.0
         quads = []
         for d in range(6):
+            if tids is None:
+                tid = texid
+            else:
+                g = 0 if d == 2 else (2 if d == 3 else 1)
+                tid = tids[g] if tids[g] is not None else texid
             corners = _face_corners(d, x0, y0, z0, x1, y1, z1)
             u1, v1, u2, v2 = _default_uv(d, x0, y0, z0, x1, y1, z1)
             uvs = []
@@ -985,8 +1126,18 @@ class Baker:
                 uu, vv = _uv_frac(d, p, x0, y0, z0, x1, y1, z1)
                 uvs.append(((u1 + uu * (u2 - u1)) / 16.0,
                             1.0 - (v1 + vv * (v2 - v1)) / 16.0))
-            quads.append((corners, d, texid, -1, 0, uvs))
+            quads.append((corners, d, tid, -1, 0, uvs))
         return quads
+
+    def _face_tids(self, tex):
+        """标注贴图 (top, side, bottom) 名 -> id 元组；全缺或全缺贴图返回 None。"""
+        if not tex:
+            return None
+        tids = tuple(self._ensure_texture(n) if n else None for n in tex)
+        if all(t is None for t in tids):
+            return None
+        fallback = next(t for t in tids if t is not None)
+        return tuple(fallback if t is None else t for t in tids)
 
     # JSON 模型之外仍需叠加的原版方块实体几何（如钟的钟体）
     _BE_EXTRA = {
@@ -1015,8 +1166,52 @@ class Baker:
                                            tex=extra[1])
         idx = len(self.variant_list)
         self.variant_list.append(quads)
+        self.variant_info.append(self._variant_meta(block, model, raw, quads))
         self.variants[key] = idx
         return idx
+
+    def _meta_of(self, block, model, json_quads):
+        """(class, tintMask, useModel)；json_quads 非空 = 有 JSON 几何。"""
+        if json_quads:
+            return (self._classify(block, model, json_quads),
+                    self._tint_mask(model),
+                    0 if self._is_full_cube(model) else 1)
+        return NONCUBE, 0, 1
+
+    def _variant_meta(self, block, model, json_quads, quads):
+        """变体级方块信息 (class, tintMask, useModel, top, side, bottom)。
+
+        与块级 _block_info 同判定，但按**该变体自己的模型**计算——这样
+        blockstate 的不同状态（如 slab 的 double 与 bottom）各自拿到正确的
+        分类与默认面，而不是被方块级信息一刀切。手工标注同样作用于变体级。"""
+        cls, mask, use_model = self._meta_of(block, model, json_quads)
+        top, side, bottom = self._pick_faces(quads)
+        ov = self.overrides.get(block) or {}
+        if ov.get("class") is not None:
+            cls = ov["class"]
+        if ov.get("use_model") is not None:
+            use_model = ov["use_model"]
+        ov_tids = self._face_tids(ov.get("tex"))
+        if ov_tids is not None:
+            top, side, bottom = ov_tids
+        return (cls, mask, use_model, top, side, bottom)
+
+    @staticmethod
+    def _pick_faces(quads):
+        """quads -> (top, side, bottom) 贴图 id（缺的面互相兜底，全缺为 None）。"""
+        faces = {}
+        for _verts, d, texid, _tint, _cull, _uv in quads:
+            faces.setdefault(d, texid)
+        top = faces.get(2)
+        bottom = faces.get(3)
+        side = faces.get(5, faces.get(4, faces.get(0, faces.get(1))))
+        if side is None:
+            side = top if top is not None else bottom
+        if top is None:
+            top = side
+        if bottom is None:
+            bottom = side
+        return top, side, bottom
 
     @staticmethod
     def _particle_name(model):
@@ -1097,7 +1292,7 @@ class Baker:
                 part_offset=layer.get("part_offset")))
         return out
 
-    def _be_variant(self, spec):
+    def _be_variant(self, spec, block=None):
         """原版方块实体规格 -> 变体索引（相同规格复用）。"""
         key = repr(spec)
         if key in self.be_variants:
@@ -1107,6 +1302,7 @@ class Baker:
             return None
         idx = len(self.variant_list)
         self.variant_list.append(quads)
+        self.variant_info.append(self._variant_meta(block, None, [], quads))
         self.be_variants[key] = idx
         return idx
 
@@ -1129,7 +1325,7 @@ class Baker:
         if specs:
             rules = []
             for spec in specs:
-                vi = self._be_variant(spec)
+                vi = self._be_variant(spec, block)
                 if vi is None:
                     continue
                 rules.append(([(k, frozenset([v])) for k, v in spec["props"]],
@@ -1222,56 +1418,124 @@ class Baker:
         return OPAQUE
 
     def _block_info(self, block):
-        """(block, class, tint_mask, use_model, top, side, bottom)；无模型返回 None。
+        """(block, class, tint_mask, use_model, top, side, bottom)；无法成条目返回 None。
 
         use_model=1 表示模型不是简单整立方体（交叉植物/楼梯/栅栏等），
-        网格器应对该方块注入烘焙模型几何而非整方块近似。"""
+        网格器应对该方块注入烘焙模型几何而非整方块近似。
+        无 JSON 模型（动态代码模型/内建模型）时，仅当手工标注给出贴图，
+        才用该贴图合成整立方体兜底——否则无法产出贴图信息。"""
+        ov = self.overrides.get(block) or {}
+        ov_tids = self._face_tids(ov.get("tex"))
         raw = self.pack.json(blockstate_resource_path(block))
         model_name = self._first_model(raw)
-        if not model_name:
-            return None
-        if not model_name.startswith("minecraft:") and ":" not in model_name:
-            model_name = "minecraft:" + model_name
-        model = self.models.load(model_name)
+        model = None
+        if model_name:
+            if not model_name.startswith("minecraft:") and ":" not in model_name:
+                model_name = "minecraft:" + model_name
+            model = self.models.load(model_name)
         if model is None:
-            return None
-        quads = build_model_quads(model, self._ensure_texture)
-        if quads:
-            cls = self._classify(block, model, quads)
-            mask = self._tint_mask(model)
-            use_model = 0 if self._is_full_cube(model) else 1
-        else:                            # 方块实体（无 JSON 几何）
-            quads = None
-            specs = _be_specs(block)
-            if specs:
-                quads = self._be_spec_quads(specs[0])
-            if not quads:                # 未收录 -> 简化代理模型
-                quads = self._proxy_quads(block, model)
-            if not quads:
+            # 无 JSON 模型（动态代码模型/内建模型）：仅当标注给出贴图才能成条目
+            if ov_tids is None:
                 return None
-            cls = NONCUBE
-            mask = 0
-            use_model = 1
-        faces = {}
-        for _verts, d, texid, _tint, _cull, _uv in quads:
-            faces.setdefault(d, texid)
-        top = faces.get(2)
-        bottom = faces.get(3)
-        side = faces.get(5, faces.get(4, faces.get(0, faces.get(1))))
-        if side is None:
-            side = top if top is not None else bottom
-        if top is None:
-            top = side
-        if bottom is None:
-            bottom = side
+            quads = self._cube_quads(None, ov_tids)
+            json_quads = []
+        else:
+            quads = build_model_quads(model, self._ensure_texture)
+            json_quads = quads
+            if not quads:                # 方块实体（无 JSON 几何）
+                specs = _be_specs(block)
+                if specs:
+                    quads = self._be_spec_quads(specs[0])   # 原版方块实体：保真几何
+                if not quads:            # 未收录 -> 简化代理模型
+                    quads = self._proxy_quads(block, model)
+                    if quads:
+                        _STATS["approx_blocks"].append(block)
+                if not quads:
+                    return None
+        cls, mask, use_model = self._meta_of(block, model, json_quads)
+        if ov:                           # 手工标注覆盖启发式结果
+            if ov.get("class") is not None:
+                cls = ov["class"]
+            if ov.get("use_model") is not None:
+                use_model = ov["use_model"]
+            self.overrides_applied.add(block)
+        top, side, bottom = self._pick_faces(quads)
+        if ov_tids is not None:          # 标注贴图优先于模型推出的默认面
+            top, side, bottom = ov_tids
         if top is None:
             return None
         return (block, cls, mask, use_model, top, side, bottom)
 
+    # -------------------------------------------------- 画（R5） ----
+    def _painting_tex(self, asset_id):
+        """asset_id -> 贴图 id。
+
+        1.21 画贴图在 textures/painting/ 下；命名习惯上 asset_id 是"画画"名
+        （如 minecraft:kebab），但也有包写成完整贴图名，两种都试。"""
+        ns, path = (asset_id.split(":", 1) if ":" in asset_id
+                    else ("minecraft", asset_id))
+        for name in ("%s:painting/%s" % (ns, path), "%s:%s" % (ns, path)):
+            tid = self._ensure_texture(name, strip=False)
+            if tid is not None:
+                return tid
+        return None
+
+    def bake_paintings(self):
+        """烘焙画变体表：data/<ns>/painting_variant/<id>.json -> (name, w, h, tex)。
+
+        width/height/asset_id 为 1.21+ 的数据驱动字段（24w18a 起）；
+        ≤1.20 的版本把变体写死在代码里、没有该表，此处返回空表，
+        读取端按"无画数据"退化（不影响其它功能）。"""
+        out = []
+        for n in sorted(self.pack.names()):
+            parts = n.split("/")
+            if (len(parts) < 4 or parts[0] != "data" or parts[2] != "painting_variant"
+                    or not n.endswith(".json")):
+                continue
+            raw = self.pack.json(n)
+            if not isinstance(raw, dict):
+                continue
+            ns = parts[1]
+            name = "/".join(parts[3:])[:-5]
+            w = int(raw.get("width") or 1)
+            h = int(raw.get("height") or 1)
+            asset = str(raw.get("asset_id") or ("%s:%s" % (ns, name)))
+            tid = self._painting_tex(asset)
+            if tid is None or not 1 <= w <= 16 or not 1 <= h <= 16:
+                print("警告: 画变体 %s:%s 贴图缺失或尺寸非法，已跳过" % (ns, name),
+                      file=sys.stderr)
+                continue
+            out.append(("%s:%s" % (ns, name), w, h, tid))
+        return out
+
+    # -------------------------------------------------- 实体模型（v5） ----
+    def _load_entity_models(self):
+        """加载 tools/vanilla_entity_models.json（分层实体模型）。
+
+        该文件由 tools/be_models/DumpEntityModels.java 从客户端 jar 的原版模型
+        工厂导出（保留每部件的 pivot / 默认旋转 / 本地顶点，供运行时按实体
+        Pose 装配）；缺失时本段为空（不影响其它功能）。"""
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "vanilla_entity_models.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        models = data.get("models") or {}
+        for name, model in sorted(models.items()):
+            tex = _ENTITY_TEX.get(name)
+            if tex:
+                self._ensure_texture(tex)        # 实体贴图进包
+                model = dict(model, tex=tex)
+            self.entity_models[name] = model
+
     # -------------------------------------------------- 主流程 ----
     def run(self, out_path):
-        _STATS["faces"] = _STATS["tex_miss"] = 0
+        _reset_stats()
         self._preload_textures()
+        self.paintings = self.bake_paintings()
+        self._load_entity_models()
         blocks = []
         for n in sorted(self.pack.names()):
             parts = n.split("/")
@@ -1305,15 +1569,22 @@ class Baker:
         out.append(struct.pack("<I", len(self.tex_blobs)))
         for name, w, h, rgba in self.tex_blobs:
             out.append(_pstr(name) + struct.pack("<HHI", w, h, len(rgba)) + rgba)
-        # 变体
+        # 变体（v3 起附带变体级方块信息：class/tintMask/useModel/默认面）
+        if len(self.variant_info) != len(self.variant_list):
+            raise SystemExit("内部错误：变体信息与变体数不一致（%d != %d）"
+                             % (len(self.variant_info), len(self.variant_list)))
         out.append(struct.pack("<I", len(self.variant_list)))
-        for quads in self.variant_list:
+        for quads, info in zip(self.variant_list, self.variant_info):
             out.append(struct.pack("<H", len(quads)))
             for verts, d, texid, tint, cull, uvs in quads:
                 rec = b"".join(_pack_vert(c) for c in verts)
                 rec += struct.pack("<BHbB", d, texid & 0xFFFF, tint, cull)
                 rec += struct.pack("<8f", *[v for uv in uvs for v in uv])
                 out.append(rec)
+            cls, mask, use_model, top, side, bottom = info
+            out.append(struct.pack("<BBBHHH", cls, mask, use_model,
+                                   _u16_or_none(top), _u16_or_none(side),
+                                   _u16_or_none(bottom)))
         # 方块状态
         out.append(struct.pack("<I", len(self.blockstates)))
         for block, mode, rules in self.blockstates:
@@ -1330,10 +1601,27 @@ class Baker:
         for block, cls, mask, use_model, top, side, bottom in self.block_tex:
             out.append(_pstr(block) + struct.pack("<BBBHHH", cls, mask, use_model,
                                                   top, side, bottom))
+        # 画变体表（v4）
+        out.append(struct.pack("<I", len(self.paintings)))
+        for name, w, h, tex in self.paintings:
+            out.append(_pstr(name) + struct.pack("<HHH", w, h, tex & 0xFFFF))
+        # 实体模型段（v5）：分层实体模型，整体以 JSON 存（运行时装配）
+        out.append(struct.pack("<I", len(self.entity_models)))
+        for name, model in self.entity_models.items():
+            blob = json.dumps(model, separators=(",", ":")).encode("utf-8")
+            out.append(_pstr(name) + struct.pack("<I", len(blob)) + blob)
         data = b"".join(out)
         with open(path, "wb") as f:
             f.write(data)
         return len(data)
+
+
+_NONE_TEX = 0xFFFF             # 变体级信息里"该面无贴图"的哨兵
+
+
+def _u16_or_none(t):
+    """贴图 id -> u16；None 写成 0xFFFF（贴图 id 上限 65534，不会冲突）。"""
+    return _NONE_TEX if t is None else int(t) & 0xFFFF
 
 
 def _pack_vert(c):
@@ -1353,6 +1641,100 @@ def _pack_vert(c):
 def _pstr(s):
     b = s.encode("utf-8")
     return struct.pack("<H", len(b)) + b
+
+
+def _warn_override(name, val, field):
+    print("警告: 分类标注 %s 的 %s=%r 无法识别，已忽略" % (name, field, val),
+          file=sys.stderr)
+
+
+def _class_value(v):
+    """标注里的 class 值 -> 0..5 整数；无法识别返回 None。"""
+    if isinstance(v, str):
+        v = _CLASS_NAMES.get(v.strip().lower())
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 5:
+        return None
+    return int(v)
+
+
+def _tex_value(v):
+    """标注里的 tex 值 -> (top, side, bottom) 贴图名；无法识别返回 None。
+
+    字符串 = 六面同一贴图；对象给 top/side/bottom（缺的面由其余面兜底）。"""
+    if isinstance(v, str):
+        n = v.strip()
+        return (n, n, n) if n else None
+    if isinstance(v, dict):
+        out = tuple((v.get(k) or None) for k in ("top", "side", "bottom"))
+        return out if any(out) else None
+    return None
+
+
+def _norm_override(name, val):
+    """标注值 -> {'class','use_model','tex'}（未覆盖项为 None）；全无效返回 None。
+
+    紧凑写法：值直接是类名/整数，等价于只覆盖 class。
+    完整写法：{"class": ..., "use_model": ..., "tex": ...}。"""
+    if isinstance(val, (str, int)) and not isinstance(val, bool):
+        cls = _class_value(val)
+        if cls is None:
+            _warn_override(name, val, "class")
+            return None
+        return {"class": cls, "use_model": None, "tex": None}
+    if not isinstance(val, dict):
+        _warn_override(name, val, "class")
+        return None
+    out = {"class": None, "use_model": None, "tex": None}
+    if "class" in val:
+        out["class"] = _class_value(val["class"])
+        if out["class"] is None:
+            _warn_override(name, val["class"], "class")
+    if "use_model" in val:
+        um = val["use_model"]
+        if isinstance(um, bool):
+            out["use_model"] = 1 if um else 0
+        elif isinstance(um, int) and um in (0, 1):
+            out["use_model"] = um
+        else:
+            _warn_override(name, um, "use_model")
+    if "tex" in val:
+        out["tex"] = _tex_value(val["tex"])
+        if out["tex"] is None:
+            _warn_override(name, val["tex"], "tex")
+    if all(v is None for v in out.values()):
+        return None
+    return out
+
+
+def load_overrides(path):
+    """读取手工标注表 -> {block: {'class','use_model','tex'}}。
+
+    值可为紧凑的类名/整数（只覆盖 class），或完整对象：
+      {"mymod:weird_glass": "transparent",
+       "mymod:barrel": {"class": "noncube", "use_model": 0},
+       "mymod:lamp": {"tex": {"top": "mymod:block/lamp_top",
+                              "side": "mymod:block/lamp"}}}
+    class 取类名（air/opaque/transparent/liquid/cutout/noncube）或 0..5 整数；
+    use_model 取 true/false 或 0/1；tex 取贴图名（字符串 = 六面相同）。
+    非法项警告后跳过，不中断烘焙。path 为 None 时返回空表。
+    """
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except OSError as e:
+        raise SystemExit("无法读取分类标注表 %s: %s" % (path, e))
+    except ValueError as e:
+        raise SystemExit("分类标注表 %s 不是合法 JSON: %s" % (path, e))
+    if not isinstance(raw, dict):
+        raise SystemExit("分类标注表 %s 顶层应为对象 {方块名: 标注}" % path)
+    out = {}
+    for name, val in raw.items():
+        ov = _norm_override(name, val)
+        if ov is not None:
+            out[name] = ov
+    return out
 
 
 def _expand_inputs(inputs):
@@ -1377,14 +1759,24 @@ def main(argv=None):
     ap.add_argument("-o", "--out", default="dist/assets.mcba")
     ap.add_argument("--mc-version", default="?")
     ap.add_argument("--only", default="", help="逗号分隔的方块名（不含命名空间）")
+    ap.add_argument("--classes", default=None,
+                    help="手工分类标注表 JSON（默认: 脚本目录下 mcbridge-classes.json）")
     args = ap.parse_args(argv)
     if Image is None:
         print("需要 Pillow：pip install pillow", file=sys.stderr)
         return 2
     only = [s.strip() for s in args.only.split(",") if s.strip()]
+    cls_path = args.classes
+    if cls_path is None:                    # 约定位置存在才自动加载
+        cand = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "mcbridge-classes.json")
+        cls_path = cand if os.path.exists(cand) else None
+    overrides = load_overrides(cls_path)
+    if overrides:
+        print("分类标注: %s（%d 条）" % (cls_path, len(overrides)), flush=True)
     inputs = _expand_inputs(args.inputs)
     pack = ResourcePack(inputs)
-    baker = Baker(pack, args.mc_version, only or None)
+    baker = Baker(pack, args.mc_version, only or None, overrides)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     nb, nv, nt = baker.run(args.out)
     size = os.path.getsize(args.out)
@@ -1393,11 +1785,23 @@ def main(argv=None):
         ns[name[0].split(":")[0]] = ns.get(name[0].split(":")[0], 0) + 1
     print("BAKED: %d blocks, %d variants, %d textures -> %s (%.1f MB)"
           % (nb, nv, nt, args.out, size / 1048576.0), flush=True)
+    if baker.paintings:
+        print("  画变体: %d（painting_variant）" % len(baker.paintings), flush=True)
     print("  命名空间: %s" % ", ".join("%s=%d" % kv for kv in
                                        sorted(ns.items(), key=lambda t: -t[1])), flush=True)
     if _STATS["tex_miss"]:
         print("  警告: %d/%d 面因贴图缺失被丢弃（检查资源包是否包含对应 textures/**）"
               % (_STATS["tex_miss"], _STATS["faces"]), file=sys.stderr, flush=True)
+    approx = _STATS["approx_blocks"]
+    if approx:
+        listed = ", ".join(approx[:20])
+        tail = "" if len(approx) <= 20 else " …（共 %d 个）" % len(approx)
+        print("  近似几何: %d 个方块为代理模型/整立方兜底: %s%s"
+              % (len(approx), listed, tail), file=sys.stderr, flush=True)
+    missed = sorted(set(overrides) - baker.overrides_applied)
+    if missed:
+        print("  警告: %d 条分类标注未生效（方块无可用模型或未烘焙）: %s"
+              % (len(missed), ", ".join(missed[:20])), file=sys.stderr, flush=True)
     return 0
 
 

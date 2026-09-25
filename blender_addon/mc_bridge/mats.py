@@ -131,7 +131,7 @@ def _pack_face_tex(block, facegrp):
     pack = _pack()
     if pack is None:
         return None
-    faces = pack.default_faces(B.base_name(block))
+    faces = pack.default_faces(block)   # 传方块状态全名：v3 包按状态解析
     if faces is None:
         return None
     tid = {"top": faces[0], "side": faces[1], "bottom": faces[2]}.get(facegrp)

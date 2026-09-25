@@ -44,7 +44,8 @@ def connect_save(p):
         dim=dim, r_load=p.r_load, r_unload=p.r_unload,
         lod1_dist=p.lod1_dist, lod2_dist=p.lod2_dist,
         ymin=p.ymin, ymax=p.ymax, mode="raw",
-        leaves_fast=(p.leaves == "fast"), inflight=p.inflight,
+        leaves_fast=(p.leaves == "fast"), group=int(p.group),
+        inflight=p.inflight,
         use_models=getattr(p, "use_models", True),
         version_interval=p.version_poll))
     state.set_runtime(client, scheduler,

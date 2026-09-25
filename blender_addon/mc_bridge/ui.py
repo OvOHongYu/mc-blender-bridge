@@ -52,6 +52,7 @@ class MCB_PT_panel(bpy.types.Panel):
         col.prop(p, "lod1_dist")
         col.prop(p, "lod2_dist")
         col.prop(p, "mode")
+        col.prop(p, "group")
         col.prop(p, "leaves")
         row = box.row(align=True)
         row.prop(p, "ymin")

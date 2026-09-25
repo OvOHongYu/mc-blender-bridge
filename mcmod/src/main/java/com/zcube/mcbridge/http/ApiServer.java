@@ -16,6 +16,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.zip.Deflater;
 
@@ -27,6 +28,7 @@ import java.util.zip.Deflater;
  *   GET /api/blocks                      方块分类表（JSON）
  *   GET /api/chunk?dim&cx&cz&ymin&ymax   MCC1（zlib）
  *   GET /api/mesh?...&lod&ao&leaves      MCM1（zlib）
+ *   GET /api/entities?dim&cx&cz         实体列表（JSON；R5 画/盔甲架）
  *   GET /api/versions?dim&cx0&cz0&cx1&cz1 版本表（zlib）
  *   GET /api/texture?block&face          PNG（不压缩）
  */
@@ -69,6 +71,7 @@ public final class ApiServer {
                 }
                 case "/api/chunk" -> chunk(ex, q);
                 case "/api/mesh" -> mesh(ex, q);
+                case "/api/entities" -> entities(ex, q);
                 case "/api/versions" -> versions(ex, q);
                 case "/api/texture" -> texture(ex, q);
                 default -> json(ex, 404, "{\"error\":\"not found\"}");
@@ -95,6 +98,7 @@ public final class ApiServer {
         }
         String body = ("{\"mod\":\"mcbridge\",\"modVersion\":\"1.0.0\",\"mcVersion\":\""
                 + server.getVersion() + "\",\"encodings\":[2],\"modes\":[\"raw\",\"mesh\"],"
+                + "\"entities\":true,"
                 + "\"dims\":[" + dims + "],\"maxQuads\":200000}");
         json(ex, 200, body);
     }
@@ -193,6 +197,29 @@ public final class ApiServer {
         binary(ex, 200, body, "application/octet-stream", 2);
     }
 
+    private void entities(HttpExchange ex, Query q) throws IOException {
+        String dim = q.get("dim", "minecraft:overworld");
+        int cx = q.getInt("cx"), cz = q.getInt("cz");
+        int ymin = q.getInt("ymin", ChunkSnapshotService.WORLD_MIN_Y);
+        int ymax = q.getInt("ymax", ChunkSnapshotService.WORLD_MIN_Y + ChunkSnapshotService.WORLD_HEIGHT);
+        var list = snapshots.snapshot(() -> {
+            var w = snapshots.world(dim);
+            return w == null ? null : snapshots.entities(w, cx, cz, ymin, ymax);
+        });
+        if (list == null) {
+            throw new BusyException();
+        }
+        StringBuilder sb = new StringBuilder("{\"entities\":[");
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(jsonVal(list.get(i)));
+        }
+        sb.append("]}");
+        json(ex, 200, sb.toString());
+    }
+
     private void versions(HttpExchange ex, Query q) throws IOException {
         String dim = q.get("dim", "minecraft:overworld");
         int cx0 = q.getInt("cx0"), cz0 = q.getInt("cz0");
@@ -274,6 +301,46 @@ public final class ApiServer {
 
     private static String jsonString(String s) {
         return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    /** 递归 JSON 序列化（实体端点用；null/列表/map/数字/布尔）。 */
+    private static String jsonVal(Object v) {
+        if (v == null) {
+            return "null";
+        }
+        if (v instanceof String s) {
+            return jsonString(s);
+        }
+        if (v instanceof Boolean b) {
+            return b ? "true" : "false";
+        }
+        if (v instanceof Number n) {
+            return n.toString();
+        }
+        if (v instanceof List<?> l) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < l.size(); i++) {
+                if (i > 0) {
+                    sb.append(',');
+                }
+                sb.append(jsonVal(l.get(i)));
+            }
+            return sb.append(']').toString();
+        }
+        if (v instanceof Map<?, ?> mm) {
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (var e : mm.entrySet()) {
+                if (!first) {
+                    sb.append(',');
+                }
+                first = false;
+                sb.append(jsonString(String.valueOf(e.getKey()))).append(':')
+                  .append(jsonVal(e.getValue()));
+            }
+            return sb.append('}').toString();
+        }
+        return "null";
     }
 
     private static final class BusyException extends RuntimeException {

@@ -2,8 +2,12 @@
 """区块调度器：以相机锚点为中心的迟滞加载/卸载、优先级队列、
 版本轮询、LOD 分级、双预算分帧。不依赖 bpy（Blender 定时器在主线程调用）。
 
+调度与装卸的最小单位是**区块组**（Params.group = 边长 1/2/4，见 R4）：
+组的键是其原区块坐标 (dim, gx, gz)，组内一次网格化产出一个 Blender 对象，
+本地网格路径下贪心矩形还能跨区块边界合并。group=1 时退化为单区块调度。
+
 状态机:  MISSING -> QUEUED -> FETCHING -> READY -> LIVE
-         LIVE --(超出 r_unload / LOD 变更 / 版本变更)--> QUEUED 或 删除
+         LIVE --(超出 r_unload / LOD 变更 / 版本变更)--> QUEUED 或删除
 """
 import heapq
 import math
@@ -31,6 +35,7 @@ class Params:
         self.mode = kw.get("mode", "mesh")           # mesh=模式B / raw=模式A
         self.use_models = kw.get("use_models", True)  # LOD0 用资产包烘焙模型
         self.leaves_fast = kw.get("leaves_fast", False)
+        self.group = int(kw.get("group", 2))         # 区块组边长（1/2/4，R4 跨区块合并）
         self.inflight = kw.get("inflight", 3)
         self.store_cap = kw.get("store_cap", 256)
         self.version_interval = kw.get("version_interval", 5.0)
@@ -40,7 +45,8 @@ class Params:
         return dict(dim=self.dim, r_load=self.r_load, r_unload=self.r_unload,
                     lod1_dist=self.lod1_dist, lod2_dist=self.lod2_dist,
                     ymin=self.ymin, ymax=self.ymax, mode=self.mode,
-                    leaves_fast=self.leaves_fast, inflight=self.inflight)
+                    leaves_fast=self.leaves_fast, group=self.group,
+                    inflight=self.inflight)
 
 
 class ChunkStore:
@@ -112,6 +118,14 @@ class Scheduler:
         self.time = time_fn or time.monotonic
         self.log = log or (lambda *a: None)
         self.store = ChunkStore(self.p.store_cap)
+        # 数据源是否提供实体（R5）：HTTP 控制模式看 /api/ping 的能力声明
+        # （旧版模组未声明 -> False，避免每次网格化 404）；
+        # 存档模式等无 server_info 的数据源按是否实现 entities() 判定。
+        si = getattr(client, "server_info", None)
+        if si is not None:
+            self.has_entities = bool(si.get("entities"))
+        else:
+            self.has_entities = hasattr(client, "entities")
         self.state = {}                 # key -> dict
         self.ready = deque()            # 应用队列 (key, payload)
         self.evict = deque()            # 删除队列 (key, reason)
@@ -137,15 +151,26 @@ class Scheduler:
     def _anchor_chunk(self):
         return (int(self.anchor[0]) >> 4, int(self.anchor[1]) >> 4)
 
-    def _dist(self, cx, cz):
-        acx, acz = self._anchor_chunk()
-        return math.hypot(cx - acx, cz - acz)
+    def _group_origin(self, cx, cz):
+        """区块坐标 -> 所属区块组的原区块坐标（组键的 (cx, cz) 分量）。"""
+        g = self.p.group
+        return (cx // g * g, cz // g * g)
 
-    def _desired_lod(self, cx, cz):
-        d = self._dist(cx, cz)
-        if d >= self.p.lod2_dist:
+    def _group_dist(self, gx, gz):
+        """区块组到锚点的距离 = 组内**最近**区块的欧氏距离。
+
+        装卸与 LOD 都以整组为单位：用"最近区块"而不是组中心，锚点所在组
+        必定是 LOD0，也不会因组中心落在半径外而漏掉锚点旁边的区块。"""
+        acx, acz = self._anchor_chunk()
+        g = self.p.group
+        dx = max(gx - acx, acx - (gx + g - 1), 0)
+        dz = max(gz - acz, acz - (gz + g - 1), 0)
+        return math.hypot(dx, dz)
+
+    def _desired_lod(self, dist):
+        if dist >= self.p.lod2_dist:
             return 2
-        if d >= self.p.lod1_dist:
+        if dist >= self.p.lod1_dist:
             return 1
         return 0
 
@@ -155,18 +180,17 @@ class Scheduler:
         acx, acz = self._anchor_chunk()
         need = {}
         R = self.p.r_load
-        for cx in range(acx - R - 1, acx + R + 2):
-            for cz in range(acz - R - 1, acz + R + 2):
-                d = math.hypot(cx - acx, cz - acz)
-                if d <= R:
-                    need[(cx, cz)] = d
+        for cx in range(acx - R, acx + R + 1):
+            for cz in range(acz - R, acz + R + 1):
+                if math.hypot(cx - acx, cz - acz) <= R:
+                    need[self._group_origin(cx, cz)] = None
         with self.lock:
-            key_of = lambda cx, cz: (self.p.dim, cx, cz)
             # 1. 缺失/变化入队
-            for (cx, cz), d in need.items():
-                key = key_of(cx, cz)
+            for (gx, gz) in need:
+                key = (self.p.dim, gx, gz)
+                d = self._group_dist(gx, gz)
                 st = self.state.get(key)
-                want_lod = self._desired_lod(cx, cz)
+                want_lod = self._desired_lod(d)
                 if st is None:
                     self.state[key] = {"status": QUEUED, "lod": want_lod,
                                        "gen": 0, "last_seen": self.time(),
@@ -182,9 +206,7 @@ class Scheduler:
                 for key, st in list(self.state.items()):
                     if st["status"] is None:
                         continue
-                    cx, cz = key[1], key[2]
-                    d = self._dist(cx, cz)
-                    if d > self.p.r_unload:
+                    if self._group_dist(key[1], key[2]) > self.p.r_unload:
                         del self.state[key]
                         self.evict.append((key, "out_of_range"))
             # 3. 补位（工作线程空闲且队列为空时按需重扫由下次 tick 处理）
@@ -217,16 +239,16 @@ class Scheduler:
         return dispatched
 
     def _fetch(self, key, lod, gen):
-        dim, cx, cz = key
+        dim, gx, gz = key
         try:
-            payload = self._fetch_geo(dim, cx, cz, lod)
+            payload = self._fetch_geo(dim, gx, gz, lod)
             with self.lock:
                 st = self.state.get(key)
                 self.inflight_keys.discard(key)
                 if st is None or st["gen"] != gen:
                     return  # 已过期（被重新入队或卸载）
                 self.ready.append((key, {"lod": lod, "geo": payload,
-                                         "yBottom": payload.get("yBottom", self.p.ymin)}))
+                                         "yBottom": self.p.ymin}))
                 st["status"] = READY
         except Exception as e:
             with self.lock:
@@ -235,26 +257,47 @@ class Scheduler:
                 if st is not None and st["gen"] == gen:
                     st["status"] = QUEUED     # 失败退避: 回到队列，等下次派发
                     # 必须重新压回优先队列，否则该区块永久搁浅
-                    self._push(self._dist(cx, cz) + 2.0, key)
+                    self._push(self._group_dist(gx, gz) + 2.0, key)
                 self.stats["errors"] += 1
                 self.stats["last_error"] = f"{key}: {e}"
             self.log("fetch error", key, e)
 
-    def _fetch_geo(self, dim, cx, cz, lod):
+    def _fetch_geo(self, dim, gx, gz, lod):
         # LOD0 且已加载资产包时走本地网格：只有本地网格路径能注入烘焙模型
-        # （近处楼梯/栅栏需要真实几何）；远处 LOD1/2 仍用服务端网格保吞吐。
+        # （近处楼梯/栅栏需要真实几何）；LOD2（及未开模型时的 LOD1）仍用服务端
+        # 网格保吞吐。两条路径都按整组产出：本地路径在组内跨区块贪心合并，
+        # 服务端路径把组内各区块网格拼成一个对象（R4）。
         if lod < 2 and (self.p.mode == "raw"
                         or (lod == 0 and self._models_on())):
-            return self._fetch_geo_raw(dim, cx, cz, lod)
-        m = self.client.mesh(dim, cx, cz, self.p.ymin, self.p.ymax,
-                             lod=lod, ao=(lod == 0),
-                             leaves=("fast" if self.p.leaves_fast else "fancy"))
-        from .codec import decode_mcm1  # noqa: F401
-        from .mesher import geo_from_arrays
-        from . import assets
-        return geo_from_arrays(m["verts"], m["dirs"], m["blocks"], m["aos"],
-                               [n for _, n in m["palette"]],
-                               models=m.get("models"), pack=assets.current())
+            geo = self._fetch_geo_local(dim, gx, gz, lod)
+        else:
+            geo = self._fetch_geo_server(dim, gx, gz, lod)
+        ent = self._entity_geo(dim, gx, gz, lod)
+        if ent is None:
+            return geo
+        return mesher.merge_geos([geo, ent], [(0.0, 0.0, 0.0)] * 2)
+
+    def _entity_geo(self, dim, gx, gz, lod):
+        """区块组内实体（目前只有画）的几何；远处 LOD 与无实体的数据源直接跳过。"""
+        if lod > 0 or not self.has_entities:
+            return None
+        from . import assets, entities
+        pack = assets.current()
+        if pack is None or not pack.paintings:
+            return None
+        ents = []
+        for i in range(self.p.group):
+            for j in range(self.p.group):
+                try:
+                    got = self.client.entities(dim, gx + i, gz + j)
+                except Exception as e:      # 损坏的实体区域文件不该拖垮整块网格
+                    self.log("entity error", (gx + i, gz + j), e)
+                    got = None
+                if got:
+                    ents.extend(got)
+        if not ents:
+            return None
+        return entities.build_geo(ents, pack, gx, gz, self.p.ymin)
 
     def _models_on(self):
         if not self.p.use_models:
@@ -263,17 +306,23 @@ class Scheduler:
         pack = assets.current()
         return pack is not None and bool(pack.blockstates)
 
-    def _fetch_geo_raw(self, dim, cx, cz, lod):
+    def _group_cells(self, gx, gz):
+        """组的 (dx, dz) 偏移序列（dx 主序），供 mesher 组装邻域用。"""
+        g = self.p.group
+        return [(dx, dz) for dx in range(-1, g + 1) for dz in range(-1, g + 1)]
+
+    def _fetch_geo_local(self, dim, gx, gz, lod):
+        """组 + 外圈一格 -> 一个填充体积 -> 一次网格化（贪心可跨区块）。"""
+        g = self.p.group
         payloads = {}
-        for dx in (-1, 0, 1):
-            for dz in (-1, 0, 1):
-                nkey = (dim, cx + dx, cz + dz)
-                payloads[(dx, dz)] = self.store.get_or_fetch(
-                    nkey, lambda k=nkey: self.client.chunk(
-                        k[0], k[1], k[2], self.p.ymin, self.p.ymax))
+        for dx, dz in self._group_cells(gx, gz):
+            nkey = (dim, gx + dx, gz + dz)
+            payloads[(dx, dz)] = self.store.get_or_fetch(
+                nkey, lambda k=nkey: self.client.chunk(
+                    k[0], k[1], k[2], self.p.ymin, self.p.ymax))
         from . import assets
         quads, pal, _, models = mesher.mesh_payload(
-            payloads, with_ao=(lod == 0), leaves_fast=self.p.leaves_fast,
+            payloads, group=g, with_ao=(lod == 0), leaves_fast=self.p.leaves_fast,
             pack=assets.current(), fluids=True)
         import numpy as np
         # 流体几何顶点是小数块坐标 -> 用 float32（整型会截断水面高度）
@@ -285,6 +334,31 @@ class Scheduler:
         from .mesher import geo_from_arrays
         return geo_from_arrays(verts, dirs, blks, aos, [n for _, n in pal],
                                models=models, pack=assets.current())
+
+    def _fetch_geo_server(self, dim, gx, gz, lod):
+        """组内逐区块取服务端网格，平移到组局部坐标后拼成一个 geo。
+
+        区块网格顶点是"区块局部块坐标、y 相对该区块的 yBottom"，组内各区块
+        yBottom 相同（同一 ymin/ymax 裁剪），故按 (yBottom - ymin) 对齐高度即可。"""
+        from . import assets
+        from .mesher import geo_from_arrays, merge_geos
+        g = self.p.group
+        pack = assets.current()
+        geos, offs = [], []
+        for dx, dz in self._group_cells(gx, gz):
+            if dx < 0 or dz < 0 or dx >= g or dz >= g:
+                continue
+            m = self.client.mesh(dim, gx + dx, gz + dz, self.p.ymin, self.p.ymax,
+                                 lod=lod, ao=(lod == 0),
+                                 leaves=("fast" if self.p.leaves_fast else "fancy"))
+            geos.append(geo_from_arrays(
+                m["verts"], m["dirs"], m["blocks"], m["aos"],
+                [n for _, n in m["palette"]], models=m.get("models"), pack=pack))
+            offs.append((16.0 * dx, float(m.get("yBottom", self.p.ymin) - self.p.ymin),
+                         16.0 * dz))
+        if g == 1:
+            return geos[0]
+        return merge_geos(geos, offs)
 
     # ------------------------------------------------------------ 应用 ----
     def poll_apply(self, max_n=2):
@@ -330,23 +404,26 @@ class Scheduler:
 
     def _poll_versions(self, keys):
         try:
+            g = self.p.group
             cxs = [k[1] for k in keys]
             czs = [k[2] for k in keys]
             vers = self.client.versions(self.p.dim, min(cxs), min(czs),
-                                        max(cxs), max(czs))
+                                        max(cxs) + g - 1, max(czs) + g - 1)
             with self.lock:
                 for key in keys:
                     st = self.state.get(key)
                     if st is None or st["status"] != LIVE:
                         continue
-                    v = vers.get((key[1], key[2]))
+                    # 组内逐区块版本按固定顺序取成元组：任何一个区块变了都重载整组
+                    v = tuple(vers.get((key[1] + i, key[2] + j))
+                              for i in range(g) for j in range(g))
                     if st["version"] is None:
                         st["version"] = v
-                    elif v is not None and v != st["version"]:
+                    elif v != st["version"]:
                         st["version"] = v
                         st["gen"] += 1
                         st["status"] = QUEUED
-                        self._push(self._dist(key[1], key[2]), key)
+                        self._push(self._group_dist(key[1], key[2]), key)
         except Exception as e:
             self.log("version poll error", e)
         finally:
@@ -362,11 +439,11 @@ class Scheduler:
             for a in range(cx - R, cx + R + 1):
                 for b in range(cz - R, cz + R + 1):
                     if math.hypot(a - cx, b - cz) <= R:
-                        keys.add((a, b))
+                        keys.add(self._group_origin(a, b))
         with self.lock:
             self.frozen = True
-            for (cx, cz) in keys:
-                key = (self.p.dim, cx, cz)
+            for (gx, gz) in keys:
+                key = (self.p.dim, gx, gz)
                 if key not in self.state or self.state[key]["status"] not in (LIVE, READY, FETCHING):
                     self.state[key] = {"status": QUEUED, "lod": 0, "gen": 0,
                                        "last_seen": self.time(), "version": None}

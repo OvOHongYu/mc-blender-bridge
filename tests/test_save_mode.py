@@ -42,6 +42,14 @@ def _long(v):
     return struct.pack(">q", v)
 
 
+def _double(v):
+    return struct.pack(">d", v)
+
+
+def _float(v):
+    return struct.pack(">f", v)
+
+
 def _string(s):
     b = s.encode()
     return struct.pack(">H", len(b)) + b
@@ -192,6 +200,43 @@ def _level_dat():
     ])))
 
 
+# ------------------------------------------------------------ 实体夹具 ----
+
+def _painting_entity(x, y, z, variant="minecraft:kebab", facing=0):
+    """画实体：id / facing / variant / Pos（底边中点，见 core/entities.py）。"""
+    return _compound([
+        (8, "id", _string("minecraft:painting")),
+        (1, "facing", _byte(facing)),
+        (8, "variant", _string(variant)),
+        (9, "Pos", _list(6, [_double(x), _double(y), _double(z)])),
+    ])
+
+
+def _armor_stand_entity(x, y, z, pose=None):
+    """盔甲架实体：id / Pos / 可选 Pose（度数）与部件显隐标记。"""
+    items = [
+        (8, "id", _string("minecraft:armor_stand")),
+        (9, "Pos", _list(6, [_double(x), _double(y), _double(z)])),
+        (9, "Rotation", _list(5, [_float(0.0), _float(0.0)])),
+    ]
+    if pose:
+        items.append((10, "Pose", _compound(
+            [(8, name, _list(5, [_float(a) for a in ang])) for name, ang in pose.items()])))
+    return _compound(items)
+
+
+def _entity_chunk(ents):
+    """实体区域文件里的一个区块：根 compound 含 Entities 列表。"""
+    return _nb(10, "", _compound([(9, "Entities", _list(10, ents))]))
+
+
+def _build_entities(world, ents):
+    """写入 entities/r.0.0.mca（区块 (0,0)），实体与方块分开存放。"""
+    d = os.path.join(world, "entities")
+    os.makedirs(d, exist_ok=True)
+    _write_region(os.path.join(d, "r.0.0.mca"), {(0, 0): _entity_chunk(ents)})
+
+
 def _build_world(tmp):
     world = os.path.join(tmp, "TestWorld")
     os.makedirs(os.path.join(world, "region"), exist_ok=True)
@@ -202,6 +247,11 @@ def _build_world(tmp):
     _write_region(os.path.join(world, "region", "r.0.0.mca"), chunks)
     with open(os.path.join(world, "level.dat"), "wb") as f:
         f.write(_level_dat())
+    # 区块 (0,0) 挂一幅 2×1 的画（贴在 z=8 朝南的墙面上，位置需落在本区块）
+    # 与一个默认姿态的盔甲架
+    _build_entities(world, [_painting_entity(8.5, 70.0, 8.0,
+                                             variant="minecraft:test_wide"),
+                             _armor_stand_entity(4.5, 72.0, 4.5)])
     return world
 
 
@@ -326,6 +376,21 @@ class TestAnvilParser(unittest.TestCase):
         self.assertEqual(pl["dim"], "minecraft:overworld")
         client.close()
 
+    def test_entities(self):
+        """实体与方块分开存放：entities/r.x.z.mca 的 Entities 段。"""
+        client = self.SaveClient(self.AnvilWorld(self.world_dir))
+        ents = client.entities("minecraft:overworld", 0, 0)
+        self.assertEqual(len(ents), 2)
+        ids = {e["id"] for e in ents}
+        self.assertEqual(ids, {"minecraft:painting", "minecraft:armor_stand"})
+        painting = next(e for e in ents if e["id"] == "minecraft:painting")
+        self.assertEqual(painting["variant"], "minecraft:test_wide")
+        self.assertEqual(painting["facing"], 0)
+        np.testing.assert_allclose(painting["Pos"], [8.5, 70.0, 8.0])
+        # 无实体文件的区块 -> 空列表（不抛异常）
+        self.assertEqual(client.entities("minecraft:overworld", 5, 5), [])
+        client.close()
+
 
 # ------------------------------------------------------------ 调度器 ----
 
@@ -350,6 +415,62 @@ class FakeImporter:
                     return True
             time.sleep(0.02)
         return False
+
+
+class _FakePaintingPack:
+    """最小资产包替身：画变体 + 合成盔甲架分层模型（供实体几何端到端测试）。"""
+
+    paintings = {"minecraft:test_wide": (2, 1, 7)}
+    _ARMOR = {
+        "texW": 64, "texH": 64, "tex": "minecraft:entity/armorstand/wood",
+        "parts": [{
+            "name": "root", "pivot": [0, 0, 0], "rot": [0, 0, 0],
+            "cuboids": [],
+            "children": [
+                {"name": "body", "pivot": [0, 0, 0], "rot": [0, 0, 0],
+                 "cuboids": [{"faces": [{"n": [0, 0, 1], "v": [
+                     [-1, 0, 0, 0, 0], [1, 0, 0, 1, 0], [1, 3, 0, 1, 1], [-1, 3, 0, 0, 1]]}]}]},
+                {"name": "head", "pivot": [0, 1, 0], "rot": [0, 0, 0],
+                 "cuboids": [{"faces": [{"n": [0, 0, 1], "v": [
+                     [-1, -7, 0, 0, 0], [1, -7, 0, 1, 0], [1, 0, 0, 1, 1], [-1, 0, 0, 0, 1]]}]}]},
+                {"name": "left_arm", "pivot": [5, 2, 0], "rot": [0, 0, 0],
+                 "cuboids": [{"faces": [{"n": [0, 0, 1], "v": [
+                     [-1, -2, 0, 0, 0], [1, -2, 0, 1, 0], [1, 10, 0, 1, 1], [-1, 10, 0, 0, 1]]}]}]},
+                {"name": "right_arm", "pivot": [-5, 2, 0], "rot": [0, 0, 0],
+                 "cuboids": [{"faces": [{"n": [0, 0, 1], "v": [
+                     [-1, -2, 0, 0, 0], [1, -2, 0, 1, 0], [1, 10, 0, 1, 1], [-1, 10, 0, 0, 1]]}]}]},
+                {"name": "base_plate", "pivot": [0, 12, 0], "rot": [0, 0, 0],
+                 "cuboids": [{"faces": [{"n": [0, 0, 1], "v": [
+                     [-6, 11, 0, 0, 0], [6, 11, 0, 1, 0], [6, 12, 0, 1, 1], [-6, 12, 0, 0, 1]]}]}]},
+                {"name": "left_body_stick", "pivot": [0, 0, 0], "rot": [0, 0, 0],
+                 "cuboids": [{"faces": [{"n": [0, 0, 1], "v": [
+                     [-1, 3, 0, 0, 0], [1, 3, 0, 1, 0], [1, 10, 0, 1, 1], [-1, 10, 0, 0, 1]]}]}]},
+                {"name": "right_body_stick", "pivot": [0, 0, 0], "rot": [0, 0, 0],
+                 "cuboids": [{"faces": [{"n": [0, 0, 1], "v": [
+                     [-1, 3, 0, 0, 0], [1, 3, 0, 1, 0], [1, 10, 0, 1, 1], [-1, 10, 0, 0, 1]]}]}]},
+                {"name": "shoulder_stick", "pivot": [0, 0, 0], "rot": [0, 0, 0],
+                 "cuboids": [{"faces": [{"n": [0, 0, 1], "v": [
+                     [-6, 10, 0, 0, 0], [6, 10, 0, 1, 0], [6, 12, 0, 1, 1], [-6, 12, 0, 0, 1]]}]}]},
+            ],
+        }],
+    }
+    entity_models = {"armor_stand": _ARMOR}
+    blockstates = {}
+
+    def tex_id(self, name):
+        return {"minecraft:entity/armorstand/wood": 8}.get(name)
+
+    def use_model(self, block):
+        return False
+
+    def variant_indices(self, block, props=None):
+        return []
+
+    def tint_mask(self, block):
+        return None
+
+    def classify(self, block):
+        return None
 
 
 class TestSaveScheduler(unittest.TestCase):
@@ -389,6 +510,63 @@ class TestSaveScheduler(unittest.TestCase):
         sch.stop()
         client.close()
 
+    def test_painting_merged_into_chunk_geo(self):
+        """R5：存档实体（画）合并进区块对象几何，材质走 ("tex", 贴图 id)。"""
+        from mc_bridge.core import assets as A
+        A.set_global(_FakePaintingPack())
+        try:
+            sch, client = self._scheduler()      # mode="raw" -> 本地网格路径
+            imp = FakeImporter()
+            sch.update_anchor(8.0, 8.0)
+            ok = imp.apply(sch)
+            self.assertEqual(sch.stats["errors"], 0, sch.stats.get("last_error"))
+            self.assertTrue(ok)
+            geo = imp.objects[("minecraft:overworld", 0, 0)]["geo"]
+            slot = geo["mats"].index(("tex", 7))
+            sel = np.repeat(geo["mat_idx"] == slot, 4)
+            verts = np.asarray(geo["verts"])[sel]
+            self.assertEqual(len(verts), 4)                       # 画 = 一个四边形
+            # 组局部坐标：底边中点 (8.5, 70, 8) + 沿 +Z 外移 1/32，宽 2 高 1
+            self.assertAlmostEqual(float(verts[:, 0].min()), 7.5)
+            self.assertAlmostEqual(float(verts[:, 0].max()), 9.5)
+            self.assertAlmostEqual(float(verts[:, 1].min()), 70.0 - (-64))
+            self.assertAlmostEqual(float(verts[:, 1].max()), 71.0 - (-64))
+            for z in verts[:, 2]:
+                self.assertAlmostEqual(float(z), 8.0 + 1.0 / 32.0, places=5)
+            sch.stop()
+            client.close()
+        finally:
+            A.clear()
+
+    def test_armor_stand_merged_into_chunk_geo(self):
+        """R5：盔甲架按 Pose 装配（合成模型），并入区块对象几何。
+
+        默认姿态（无 ShowArms）：躯干 + 头 + 两根木杆 + 肩杆 + 底座 = 6 面，
+        底边对齐实体 Pos.y，头在顶部（总高 = 合成模型 30/16 = 1.875）。"""
+        from mc_bridge.core import assets as A
+        A.set_global(_FakePaintingPack())
+        try:
+            sch, client = self._scheduler()
+            imp = FakeImporter()
+            sch.update_anchor(8.0, 8.0)
+            ok = imp.apply(sch)
+            self.assertEqual(sch.stats["errors"], 0, sch.stats.get("last_error"))
+            self.assertTrue(ok)
+            geo = imp.objects[("minecraft:overworld", 0, 0)]["geo"]
+            slot = geo["mats"].index(("tex", 8))
+            sel = np.repeat(geo["mat_idx"] == slot, 4)
+            verts = np.asarray(geo["verts"])[sel].reshape(-1, 4, 3)
+            self.assertEqual(len(verts), 6)                       # 6 个部件面
+            # 底边 = 实体 Pos.y = 72（局部 y = 72 - yBottom）
+            self.assertAlmostEqual(float(verts[:, :, 1].min()), 72.0 + 64.0, places=4)
+            # 总高 = 合成模型 30/16 = 1.875；头部面在顶部
+            self.assertAlmostEqual(float(verts[:, :, 1].max()) - float(verts[:, :, 1].min()),
+                                   1.875, places=4)
+            sch.stop()
+            client.close()
+        finally:
+            A.clear()
+
     def test_versions_static(self):
         """存档模式版本恒 0，不触发重载。"""
         sch, client = self._scheduler()
@@ -401,7 +579,8 @@ class TestSaveScheduler(unittest.TestCase):
         while sch._version_polling and time.time() < deadline:
             time.sleep(0.02)
         self.assertEqual(sch.state[key]["status"], "LIVE")
-        self.assertEqual(sch.state[key]["version"], 0)
+        # 组内逐区块版本聚合为元组（组边长 2 -> 4 个区块）
+        self.assertEqual(set(sch.state[key]["version"]), {0})
         sch.stop()
         client.close()
 

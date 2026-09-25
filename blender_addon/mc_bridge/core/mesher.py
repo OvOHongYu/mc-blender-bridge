@@ -2,8 +2,9 @@
 """贪心网格器（模式 A：Blender/模拟器本地网格化；Java 模组按本实现移植）。
 
 数据约定:
-  - 体积数组索引 [x, y, z]，形状 (18, H+2, 18)（含 1 格 air 边框，
-    由 3×3 区块邻域拼装，见 assemble_padded）。
+  - 体积数组索引 [x, y, z]，形状 (16*G+2, H+2, 16*G+2)（含 1 格 air 边框，
+    由 (G+2)×(G+2) 区块邻域拼装，见 assemble_padded；G = 区块组边长）。
+    G=1 即单区块网格，G>1 时贪心矩形可跨区块边界合并。
   - 面可见性矩阵（a 为面所属方块, b 为相邻方块）:
       a 是 air        -> 不可见
       b 是 class1     -> 不可见（不透明遮挡一切）
@@ -29,53 +30,59 @@ _FLIP_POS = (False, True, False)
 
 # ------------------------------------------------------------ 体积拼装 ----
 
-def assemble_padded(payloads, center=(0, 0)):
+def assemble_padded(payloads, group=1):
     """payloads: dict[(dx,dz)] -> MCC1 payload 或 None（缺失按 air）。
-    返回 (cls, gid, H, palette)。palette 为中心区块的区块级调色板，
-    邻居区块的调色板按名字重映射并入（与 Java fillVolume 一致）。"""
-    cp = payloads[center]
+
+    group = 区块组边长（1 = 单区块，即旧行为）。键的取值 [0, group-1] 是组本体，
+    -1 与 group 各是外圈一格（邻居区块），供组边界剔除面子。返回
+    (cls, gid, H, palette)，数组形状 (16*group+2, H+2, 16*group+2)；
+    palette 以 (0,0) 区块的区块级调色板为基，其余按名字重映射并入
+    （与 Java fillVolume 一致）。"""
+    cp = payloads[(0, 0)]
     h_secs = len(cp["sections"])
     H = h_secs * 16
-    big_cls = np.zeros((18, H, 18), np.uint8)
-    big_gid = np.zeros((18, H, 18), np.uint16)
+    n = 16 * group
+    span = n + 2
+    big_cls = np.zeros((span, H, span), np.uint8)
+    big_gid = np.zeros((span, H, span), np.uint16)
 
     _, _, pal0, _ = build_arrays(cp)
     name2gid = {name: i for i, (c, name) in enumerate(pal0)}
     ext_pal = list(pal0)
 
-    def put(dx, dz, payload, region):
-        if payload is None:
-            return
-        assert len(payload["sections"]) == h_secs, "height mismatch"
-        cls, gid, npal, _ = build_arrays(payload)       # (H,16,16) [y,z,x]
-        if payload is not cp:
-            # 邻居调色板 -> 中心（可扩展）调色板
-            remap = np.zeros(len(npal), np.uint16)
-            for i, (c, name) in enumerate(npal):
-                if name in name2gid:
-                    remap[i] = name2gid[name]
-                else:
-                    name2gid[name] = len(ext_pal)
-                    ext_pal.append((c, name))
-                    remap[i] = len(ext_pal) - 1
-            gid = remap[gid]
-        cx_ = np.transpose(cls, (2, 0, 1))               # [x,y,z]
-        gx_ = np.transpose(gid, (2, 0, 1))
-        big_cls[region[0], :, region[1]] = cx_[region[2], :, region[3]]
-        big_gid[region[0], :, region[1]] = gx_[region[2], :, region[3]]
+    for dx in range(-1, group + 1):
+        for dz in range(-1, group + 1):
+            payload = payloads.get((dx, dz))
+            if payload is None:
+                continue
+            assert len(payload["sections"]) == h_secs, "height mismatch"
+            cls, gid, npal, _ = build_arrays(payload)   # (H,16,16) [y,z,x]
+            if payload is not cp:
+                # 邻居调色板 -> 组（可扩展）调色板
+                remap = np.zeros(len(npal), np.uint16)
+                for i, (c, name) in enumerate(npal):
+                    if name in name2gid:
+                        remap[i] = name2gid[name]
+                    else:
+                        name2gid[name] = len(ext_pal)
+                        ext_pal.append((c, name))
+                        remap[i] = len(ext_pal) - 1
+                gid = remap[gid]
+            # 该区块在 padded 坐标里的区间 [x0, x1) × [z0, z1)；组外圈只落进 1 格
+            x0, x1 = 16 * dx + 1, 16 * dx + 17
+            z0, z1 = 16 * dz + 1, 16 * dz + 17
+            tx0, tx1 = max(0, x0), min(span, x1)
+            tz0, tz1 = max(0, z0), min(span, z1)
+            if tx0 >= tx1 or tz0 >= tz1:
+                continue
+            sx, sz = tx0 - x0, tz0 - z0
+            sub_cls = cls[:, sz:sz + tz1 - tz0, sx:sx + tx1 - tx0]
+            sub_gid = gid[:, sz:sz + tz1 - tz0, sx:sx + tx1 - tx0]
+            big_cls[tx0:tx1, :, tz0:tz1] = np.transpose(sub_cls, (2, 0, 1))
+            big_gid[tx0:tx1, :, tz0:tz1] = np.transpose(sub_gid, (2, 0, 1))
 
-    put(0, 0, cp, (slice(1, 17), slice(1, 17), slice(0, 16), slice(0, 16)))
-    put(-1, 0, payloads.get((-1, 0)), (slice(0, 1), slice(1, 17), slice(15, 16), slice(0, 16)))
-    put(1, 0, payloads.get((1, 0)), (slice(17, 18), slice(1, 17), slice(0, 1), slice(0, 16)))
-    put(0, -1, payloads.get((0, -1)), (slice(1, 17), slice(0, 1), slice(0, 16), slice(15, 16)))
-    put(0, 1, payloads.get((0, 1)), (slice(1, 17), slice(17, 18), slice(0, 16), slice(0, 1)))
-    put(-1, -1, payloads.get((-1, -1)), (slice(0, 1), slice(0, 1), slice(15, 16), slice(15, 16)))
-    put(-1, 1, payloads.get((-1, 1)), (slice(0, 1), slice(17, 18), slice(15, 16), slice(0, 1)))
-    put(1, -1, payloads.get((1, -1)), (slice(17, 18), slice(0, 1), slice(0, 1), slice(15, 16)))
-    put(1, 1, payloads.get((1, 1)), (slice(17, 18), slice(17, 18), slice(0, 1), slice(0, 1)))
-
-    cls = np.zeros((18, H + 2, 18), np.uint8)
-    gid = np.zeros((18, H + 2, 18), np.uint16)
+    cls = np.zeros((span, H + 2, span), np.uint8)
+    gid = np.zeros((span, H + 2, span), np.uint16)
     cls[:, 1:H + 1, :] = big_cls
     gid[:, 1:H + 1, :] = big_gid
     return cls, gid, H, ext_pal
@@ -145,10 +152,10 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
             ecls = int(ent[0])
             if ecls == B.AIR or ecls == B.OPAQUE:
                 continue        # 整立方体（含草方块等带叠加层）走贪心路径
-            base = B.base_name(ent[1])
-            if not pack.use_model(base):
+            name = ent[1]
+            if not pack.use_model(name):     # 传方块状态全名：v3 包按状态解析
                 continue
-            vis = pack.variant_indices(base, B.props_of(ent[1]))
+            vis = pack.variant_indices(B.base_name(name), B.props_of(name))
             if vis:
                 modeled[gi] = vis
     for d in range(3):
@@ -220,7 +227,7 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
                         _emit(quads, blk, i, u0, v0, w, h, d, positive,
                                ao, i_col=None, with_ao=with_ao)
 
-    # 交叉面片植物（CUTOUT 非树叶）：对角双面片，dir=0(+X)->side 贴图
+    # 交叉面片植物（CUTOUT 非树叶）：对角两个面片，dir=0(+X)->side 贴图
     if cross is not None:
         cross_cell = np.asarray(cross)[gid]
         mask = (cls != 0) & cross_cell
@@ -236,11 +243,11 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
                       (bx + 1, by + 1, bz + 1), (bx, by + 1, bz))
             diag_b = ((bx, by, bz + 1), (bx + 1, by, bz),
                       (bx + 1, by + 1, bz), (bx, by + 1, bz + 1))
-            for base in (diag_a, diag_b):
-                # 反向绕序 = 交换角点 1/3（与 Java emitCrosses 一致）
-                for verts in (base, (base[0], base[3], base[2], base[1])):
-                    flat = tuple(c for pt in verts for c in pt)
-                    quads.append((flat, 0, g, (3, 3, 3, 3)))
+            # 每个对角面片只发射一次：Blender 默认双面渲染（材质未开背面剔除），
+            # 再补一层反向绕序会与原面共面重叠 -> Z-Fighting。
+            for verts in (diag_a, diag_b):
+                flat = tuple(c for pt in verts for c in pt)
+                quads.append((flat, 0, g, (3, 3, 3, 3)))
 
     # 一次性把 (12-int tuple) 顶点转为 numpy 视图（下游接口不变）
     if modeled:
@@ -412,7 +419,7 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None):
                 pack = None
         tints = np.ones((len(palette), 3, 3), np.float32)         # [pal][facegrp][rgb]
         for i, name in enumerate(palette):
-            mask = pack.tint_mask(B.base_name(name)) if pack is not None else None
+            mask = pack.tint_mask(name) if pack is not None else None
             for fg in range(3):
                 if mask is None:
                     t = B.tint_of(name)
@@ -472,6 +479,63 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None):
             "tris": total * 2}
 
 
+def entity_geo(quads):
+    """实体四边形流 -> geo 片段（与 geo_from_arrays / merge_geos 同构）。
+
+    quads: list[(verts (4,3) float32 方块单位, uv (4,2) float32 0..1, tex_id int)]；
+    顶点色恒为 1（实体几何不参与 AO / 方块染色）。"""
+    quads = [q for q in quads if len(q[0]) == 4]
+    if not quads:
+        return None
+    verts = np.array([q[0] for q in quads], np.float32).reshape(-1, 3)
+    uv = np.array([q[1] for q in quads], np.float32).reshape(-1, 2)
+    tex = np.array([q[2] for q in quads], np.int32)
+    uniq, inv = np.unique(tex, return_inverse=True)
+    return {"nq": len(quads), "verts": verts, "uv": uv,
+            "vcol": np.full((verts.shape[0], 4), 255, np.uint8),
+            "mat_idx": inv.astype(np.uint16),
+            "mats": [("tex", int(t)) for t in uniq],
+            "tris": len(quads) * 2}
+
+
+def merge_geos(geos, offsets):
+    """把多个 geo_from_arrays 结果拼成一个（区块组 / 实体几何叠加用）。
+
+    offsets: 与 geos 等长的 (dx, dy, dz) 平移量（方块单位，浮点）；
+    材质描述符按内容去重成一个公共材质表，mat_idx 相应重映射。"""
+    empty = {"nq": 0, "verts": np.zeros((0, 3), np.float32),
+             "uv": np.zeros((0, 2), np.float32),
+             "vcol": np.zeros((0, 4), np.uint8),
+             "mat_idx": np.zeros(0, np.uint16), "mats": [], "tris": 0}
+    parts, mats, idx_parts = [], [], []
+    slot = {}
+    for geo, off in zip(geos, offsets):
+        if not geo or not geo["nq"]:
+            continue
+        remap = np.empty(len(geo["mats"]), np.uint16)
+        for i, desc in enumerate(geo["mats"]):
+            j = slot.get(desc)
+            if j is None:
+                j = len(mats)
+                slot[desc] = j
+                mats.append(desc)
+            remap[i] = j
+        idx_parts.append(remap[geo["mat_idx"]])
+        verts = np.array(geo["verts"], np.float32, copy=True)
+        if off[0] or off[1] or off[2]:
+            verts += np.array(off, np.float32)
+        parts.append((verts, geo["uv"], geo["vcol"]))
+    if not parts:
+        return dict(empty, mats=mats)
+    verts = np.concatenate([p[0] for p in parts])
+    uv = np.concatenate([p[1] for p in parts])
+    vcol = np.concatenate([p[2] for p in parts])
+    nq = verts.shape[0] // 4
+    return {"nq": nq, "verts": verts, "uv": uv, "vcol": vcol,
+            "mat_idx": np.concatenate(idx_parts).astype(np.uint16),
+            "mats": mats, "tris": nq * 2}
+
+
 # ------------------------------------------------------------ 流体 ----
 # 类原版流体几何（对照 MC 1.21.1 FluidRenderer，逐指令核对 javap 反汇编）：
 #   单列高度 h: 同种流体时「上方仍是同种流体 ? 1.0 : getHeight()」（getHeight = 流体 level/9，
@@ -515,9 +579,11 @@ def _fluid_height(name):
 def _fluid_quads(cls, gid, palette):
     """液体方块的类原版几何；顶点为区块局部方块单位（可为小数）。
 
-    cls/gid 是 assemble_padded 的填充数组（y 维 = 区块层数 + 2 层边框），
-    因此层数 = shape[1] - 2，方块层位于 y 索引 1..H。"""
+    cls/gid 是 assemble_padded 的填充数组（y 维 = 区块层数 + 2 层边框，
+    x/z 维 = 16*组边长 + 2），因此层数 = shape[1] - 2，方块格位于 [1, E) ×
+    [1, H+1) × [1, E)，E = shape[0] - 1。"""
     H = cls.shape[1] - 2
+    E = cls.shape[0] - 1
     n = len(palette)
     is_liq = np.zeros(n, bool)
     is_solid = np.zeros(n, bool)
@@ -544,9 +610,9 @@ def _fluid_quads(cls, gid, palette):
     h = np.where(liq, np.where(above_same, 1.0, frac[gid]),
                  np.where(sol, -1.0, 0.0)).astype(np.float32)
 
-    own = h[1:17, 1:H + 1, 1:17]
-    liq_c = liq[1:17, 1:H + 1, 1:17]
-    bid_c = bid[1:17, 1:H + 1, 1:17]
+    own = h[1:E, 1:H + 1, 1:E]
+    liq_c = liq[1:E, 1:H + 1, 1:E]
+    bid_c = bid[1:E, 1:H + 1, 1:E]
 
     def _nb(sx, sz):
         """邻居列高度。
@@ -554,7 +620,7 @@ def _fluid_quads(cls, gid, palette):
         原版邻居高度 = getFluidHeight(world, **当前渲染的流体**, 邻居pos)：邻居必须是
         「与当前渲染流体同种」才按流体高度计入，否则走 solid ? -1 : 0 —— 水/岩浆相邻时
         彼此按 0 处理，不能直接借用邻居自己的列高度。"""
-        sl = (slice(1 + sx, 17 + sx), slice(1, H + 1), slice(1 + sz, 17 + sz))
+        sl = (slice(1 + sx, E + sx), slice(1, H + 1), slice(1 + sz, E + sz))
         return np.where(liq[sl] & (bid[sl] != bid_c), 0.0, h[sl])
 
     corners = {}
@@ -592,7 +658,7 @@ def _fluid_quads(cls, gid, palette):
                 float(corners[(1, 1)][i, j, k]), float(corners[(1, -1)][i, j, k]))
 
     # 顶面：上方不是同种流体且未被不透明方块遮挡
-    top = liq_c & ~above_same[1:17, 1:H + 1, 1:17] & ~opa[1:17, 2:H + 2, 1:17]
+    top = liq_c & ~above_same[1:E, 1:H + 1, 1:E] & ~opa[1:E, 2:H + 2, 1:E]
     for i, j, k in zip(*np.nonzero(top)):
         X, Y, Z = int(i), int(j), int(k)
         c00, c01, c11, c10 = _corners(i, j, k)
@@ -604,7 +670,7 @@ def _fluid_quads(cls, gid, palette):
     below_same = np.zeros_like(liq)
     below_same[:, 1:, :] = (liq[:, :-1, :] & liq[:, 1:, :]
                             & (bid[:, :-1, :] == bid[:, 1:, :]))
-    bot = liq_c & ~below_same[1:17, 1:H + 1, 1:17] & ~opa[1:17, 0:H, 1:17]
+    bot = liq_c & ~below_same[1:E, 1:H + 1, 1:E] & ~opa[1:E, 0:H, 1:E]
     for i, j, k in zip(*np.nonzero(bot)):
         X, Y, Z = int(i), int(j), int(k)
         out.append((((X, Y, Z), (X + 1, Y, Z), (X + 1, Y, Z + 1), (X, Y, Z + 1)),
@@ -612,8 +678,8 @@ def _fluid_quads(cls, gid, palette):
 
     # 四个侧面：邻居不是同种流体且未被遮挡（顶边沿该侧两个角高度）
     for sx, sz in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        nb = (slice(1 + sx, 17 + sx), slice(1, H + 1), slice(1 + sz, 17 + sz))
-        nb_same = liq[nb] & (bid[nb] == bid[1:17, 1:H + 1, 1:17])
+        nb = (slice(1 + sx, E + sx), slice(1, H + 1), slice(1 + sz, E + sz))
+        nb_same = liq[nb] & (bid[nb] == bid[1:E, 1:H + 1, 1:E])
         mask = liq_c & ~nb_same & ~opa[nb]
         for i, j, k in zip(*np.nonzero(mask)):
             X, Y, Z = int(i), int(j), int(k)
@@ -636,14 +702,17 @@ def _fluid_quads(cls, gid, palette):
     return out
 
 
-def mesh_payload(payloads, center=(0, 0), with_ao=True, leaves_fast=False,
+def mesh_payload(payloads, group=1, with_ao=True, leaves_fast=False,
                  pack=None, fluids=False):
-    """3×3 payload 字典 -> (quads, palette, y_bottom, models)。
+    """(group+2)×(group+2) payload 字典 -> (quads, palette, y_bottom, models)。
+
+    group = 区块组边长：键 (dx,dz) ∈ [-1, group]，内圈 [0, group-1] 是组本体，
+    外圈一格作剔除面用。group>1 时贪心矩形可跨区块边界合并（对象数按 group² 下降）。
 
     fluids=True 时把液体的整方块面换成类原版流体几何（见上），并剔除资产包为
-    液体注入的整方块烘焙模型（use_model 按模型占空比判定、与 class 无关，
-    水/岩浆会命中），否则整方块与流体几何会在同一格重叠。"""
-    cls, gid, H, pal = assemble_padded(payloads, center)
+    液体注入的整方块烘焙模型（use_model 只表示"模型不是简单整立方体"、与
+    class 无关，水/岩浆同样会命中），否则整方块与流体几何会在同一格重叠。"""
+    cls, gid, H, pal = assemble_padded(payloads, group)
     # 交叉面片: CUTOUT 且非树叶（与 Java 侧 BlockClassifier 规则一致）
     cross = np.zeros(len(pal), bool)
     for i, (c, name) in enumerate(pal):
@@ -654,8 +723,8 @@ def mesh_payload(payloads, center=(0, 0), with_ao=True, leaves_fast=False,
         liq_ids = {i for i, (c, _) in enumerate(pal) if c == B.LIQUID}
         if liq_ids:
             quads = [q for q in quads if int(q[2]) not in liq_ids]
-            # 资产包对液体也会注入整方块烘焙模型（use_model 只看模型占空比，
-            # 与 class 无关）——必须一并剔除，否则与流体几何在同一格重叠
+            # 资产包对液体也会注入整方块烘焙模型（use_model 只看模型是否为
+            # 简单整立方体，与 class 无关）——必须一并剔除，否则与流体几何重叠
             models = [m for m in models if int(m[6]) not in liq_ids]
             quads.extend(_fluid_quads(cls, gid, pal))
     return quads, pal, None, models

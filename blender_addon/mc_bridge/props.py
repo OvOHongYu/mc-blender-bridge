@@ -20,6 +20,7 @@ _defaults = {
     "ymin": -64,
     "ymax": 320,
     "mode": "mesh",
+    "group": "2",
     "leaves": "fancy",
     "inflight": 8,
     "apply_per_tick": 8,
@@ -70,6 +71,15 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                  items=[("mesh", "服务端网格 (B)", "MC/模组侧贪心网格化，推荐"),
                                         ("raw", "本地网格 (A)", "拉取原始区块，Blender 侧 numpy 网格化")],
                                  default=_defaults["mode"])
+    group: bpy.props.EnumProperty(name="区块组",
+                                  items=[("1", "1×1", "单区块对象；对象数最多，帧内负担最均匀"),
+                                         ("2", "2×2", "4 区块合并为一个对象（对象数 /4）"),
+                                         ("4", "4×4", "16 区块合并为一个对象（对象数 /16，单帧负担更集中）")],
+                                  default=_defaults["group"],
+                                  description="跨区块贪心合并的组边长：本地网格路径下"
+                                              "贪心矩形可跨区块边界，两条路径都按组合并对象。"
+                                              "组越大对象数越少（draw call 下降），"
+                                              "但单个对象更大、LOD 分级更粗")
     leaves: bpy.props.EnumProperty(name="树叶",
                                    items=[("fancy", "Fancy（不遮挡）", ""),
                                           ("fast", "Fast（按实心处理）", "")],

@@ -210,7 +210,7 @@ def _decode_block_states(bs):
 
 
 def _classify(name):
-    """base 名 -> class 字节（共享表优先，其次资产包烘焙分类，兜底不透明）。"""
+    """方块状态名 -> class 字节（共享表优先，其次资产包按状态分类，兜底不透明）。"""
     base = name.split("[", 1)[0]
     gid = B.INDEX.get(base)
     if gid is not None:
@@ -218,7 +218,7 @@ def _classify(name):
     from . import assets
     pack = assets.current()
     if pack is not None:
-        c = pack.classify(base)
+        c = pack.classify(name)      # 传全名：资产包按该状态解析（v3 包）
         if c is not None:
             return c
     return 1
@@ -269,7 +269,7 @@ class RegionFile:
 # ---------------------------------------------------------------- World ----
 
 class AnvilWorld:
-    """存档根目录只读访问：维度 region + 区块 payload LRU。"""
+    """存档根目录只读访问：维度 region / entities + 区块 payload LRU。"""
 
     def __init__(self, save_root):
         if not os.path.isdir(save_root):
@@ -284,6 +284,8 @@ class AnvilWorld:
         self._region_cap = 64
         self._payloads = OrderedDict()         # (dim, cx, cz) -> MCC1 payload
         self._payload_cap = 512
+        self._entities = OrderedDict()         # (dim, cx, cz) -> [实体 NBT]
+        self._entity_cap = 256
         self.lock = threading.Lock()
         self.mc_version = self._read_level_dat()
 
@@ -304,21 +306,22 @@ class AnvilWorld:
             return "?"
 
     # ------------------------------------------------------------ Region ----
-    def _dim_dir(self, dim):
+    def _dim_base(self, dim):
+        """维度根目录（overworld 为存档根，其余为 DIM-1 / DIM1）。"""
         dim = norm_dim(dim)
         if dim not in DIMS:
             raise KeyError("不支持的维度: %s" % dim)
         sub = DIMS[dim][0]
-        base = self.save_root if not sub else os.path.join(self.save_root, sub)
-        return os.path.join(base, "region")
+        return os.path.join(self.save_root, sub) if sub else self.save_root
 
-    def _region(self, dim, rx, rz):
-        key = (dim, rx, rz)
+    def _region(self, dim, rx, rz, kind="region"):
+        """区域文件（kind = "region" 区块 / "entities" 实体），带 LRU。"""
+        key = (dim, kind, rx, rz)
         reg = self._regions.get(key)
         if reg is not None:
             self._regions.move_to_end(key)
             return reg
-        path = os.path.join(self._dim_dir(dim), "r.%d.%d.mca" % (rx, rz))
+        path = os.path.join(self._dim_base(dim), kind, "r.%d.%d.mca" % (rx, rz))
         if not os.path.exists(path):
             return None
         reg = RegionFile(path)
@@ -336,12 +339,43 @@ class AnvilWorld:
             return None
         return reg.chunk_bytes(cx & 31, cz & 31)
 
+    # ------------------------------------------------------------ 实体 ----
+    def entity_payload(self, dim, cx, cz):
+        """区块内实体列表（entities/r.x.z.mca 的 Entities 段）；无文件返回 []。
+
+        实体与方块分开存放：`<维度>/entities/r.x.z.mca`，格式与区块区域文件
+        相同（1024 项偏移表 + zlib 块），根 compound 含 "Entities" 列表。"""
+        dim = norm_dim(dim)
+        key = (dim, cx, cz)
+        with self.lock:
+            hit = self._entities.get(key)
+            if hit is not None:
+                self._entities.move_to_end(key)
+                return hit
+        ents = []
+        reg = self._region(dim, cx >> 5, cz >> 5, kind="entities")
+        if reg is not None:
+            data = reg.chunk_bytes(cx & 31, cz & 31)
+            if data:
+                named = NBTReader(data).read_named()
+                root = named[1] if named else {}
+                got = root.get("Entities") if isinstance(root, dict) else None
+                if isinstance(got, list):
+                    ents = got
+        with self.lock:
+            self._entities[key] = ents
+            self._entities.move_to_end(key)
+            while len(self._entities) > self._entity_cap:
+                self._entities.popitem(last=False)
+        return ents
+
     def close(self):
         with self.lock:
             for reg in self._regions.values():
                 reg.close()
             self._regions.clear()
             self._payloads.clear()
+            self._entities.clear()
 
     # ------------------------------------------------------------ 区块 ----
     def _clip(self, dim, ymin, ymax):
@@ -467,13 +501,18 @@ class SaveClient:
         dims = [{"id": d, "minY": m, "height": h} for d, (_, m, h) in DIMS.items()]
         return {"mod": "mcbridge-save", "modVersion": "1.0.0",
                 "mcVersion": self.world.mc_version, "encodings": [],
-                "modes": ["raw"], "dims": dims, "maxQuads": 0}
+                "modes": ["raw"], "entities": True,
+                "dims": dims, "maxQuads": 0}
 
     def blocks(self):
         return B.blocks_json()
 
     def chunk(self, dim, cx, cz, ymin, ymax):
         return self.world.chunk_payload(dim, cx, cz, ymin, ymax)
+
+    def entities(self, dim, cx, cz):
+        """区块内实体 NBT 列表（entities/*.mca；渲染见 core/entities.py）。"""
+        return self.world.entity_payload(dim, cx, cz)
 
     def mesh(self, dim, cx, cz, ymin, ymax, lod=0, ao=None, leaves=None):
         """本地网格（与模拟服务器同路径）；LOD2 走高度壳。

@@ -98,7 +98,7 @@ class TestAddonSmoke(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual(sch.stats["errors"], 0)
         n = self.importer.count_live()
-        self.assertGreaterEqual(n, 9)       # r_load=2 -> ~13 区块
+        self.assertGreaterEqual(n, 6)       # r_load=2 -> 13 区块，2×2 组 -> 6 个对象
         obj = bpy.data.objects.get("MCB_ow_0_0")
         self.assertIsNotNone(obj)
         self.assertGreater(len(obj.data.vertices.co), 0)

@@ -8,9 +8,14 @@ import com.zcube.mcbridge.mesh.BlockClass;
 import com.zcube.mcbridge.mesh.BlockClassifier;
 import com.zcube.mcbridge.mesh.GreedyMesher;
 import net.minecraft.block.BlockState;
+import net.minecraft.entity.EntityType;
+import net.minecraft.entity.decoration.ArmorStandEntity;
+import net.minecraft.entity.decoration.painting.PaintingEntity;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.EulerAngle;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.ChunkStatus;
@@ -18,6 +23,7 @@ import net.minecraft.world.chunk.WorldChunk;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
@@ -174,7 +180,52 @@ public final class ChunkSnapshotService {
     }
 
     /**
-     * 3×3 邻域 → padded 体积 (18, H+2, 18) → 服务端贪心网格（与 Python 模式 A/B
+     * 区块内实体列表（R5 控制模式）：只提取插件需要的字段（画 / 盔甲架）。
+     *
+     * 按包围盒查实体（EntityLookup 的区块索引），返回 JSON 友好的 map 列表；
+     * 其它实体类型暂不提取（见 docs/roadmap.md R5 待办）。
+     */
+    public List<Map<String, Object>> entities(ServerWorld w, int cx, int cz,
+                                              int ymin, int ymax) {
+        Box box = new Box(cx * 16.0, ymin, cz * 16.0,
+                          cx * 16.0 + 16.0, ymax, cz * 16.0 + 16.0);
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (PaintingEntity p : w.getEntitiesByType(EntityType.PAINTING, box, e -> true)) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", "minecraft:painting");
+            m.put("Pos", List.of(p.getX(), p.getY(), p.getZ()));
+            m.put("facing", p.getHorizontalFacing().getHorizontal());
+            m.put("variant", p.getVariant().getIdAsString());
+            out.add(m);
+        }
+        for (ArmorStandEntity a : w.getEntitiesByType(EntityType.ARMOR_STAND, box, e -> true)) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", "minecraft:armor_stand");
+            m.put("Pos", List.of(a.getX(), a.getY(), a.getZ()));
+            m.put("Rotation", List.of((double) a.getYaw(), (double) a.getPitch()));
+            m.put("Small", a.isSmall());
+            m.put("ShowArms", a.shouldShowArms());
+            m.put("NoBasePlate", a.shouldHideBasePlate());
+            m.put("Marker", a.isMarker());
+            m.put("Invisible", a.isInvisible());
+            Map<String, List<Double>> pose = new LinkedHashMap<>();
+            pose.put("Head", euler(a.getHeadRotation()));
+            pose.put("Body", euler(a.getBodyRotation()));
+            pose.put("LeftArm", euler(a.getLeftArmRotation()));
+            pose.put("RightArm", euler(a.getRightArmRotation()));
+            pose.put("LeftLeg", euler(a.getLeftLegRotation()));
+            pose.put("RightLeg", euler(a.getRightLegRotation()));
+            m.put("Pose", pose);
+            out.add(m);
+        }
+        return out;
+    }
+
+    private static List<Double> euler(EulerAngle a) {
+        return List.of((double) a.getPitch(), (double) a.getYaw(), (double) a.getRoll());
+    }
+
+    /** 3×3 邻域 → padded 体积 (18, H+2, 18) → 服务端贪心网格（与 Python 模式 A/B
      * 相同算法）。返回 quad 列表与区块级调色板。
      */
     public record Meshed(List<Quad> quads, List<PalEntry> palette, int yBottom) {

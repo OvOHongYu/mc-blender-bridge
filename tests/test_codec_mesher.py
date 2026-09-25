@@ -132,6 +132,32 @@ def mesh_single(idx3, with_ao=True, leaves_fast=False):
     return quads, pal_out
 
 
+def mesh_single_cross(idx3, with_ao=True, leaves_fast=False):
+    """同 mesh_single，但按 mesh_payload 规则传入 cross 标记（CUTOUT 且非树叶）。"""
+    pal, idx = block_idx(idx3, "x")
+    p = make_payload(secs=[(pal, idx)])
+    cls, gid, _H, pal_out = mesher.assemble_padded({(0, 0): p})
+    cross = np.zeros(len(pal_out), bool)
+    for i, (c, name) in enumerate(pal_out):
+        cross[i] = (c == B.CUTOUT) and ("leaves" not in name)
+    quads, _ = mesher.mesh_padded(cls, gid, with_ao=with_ao,
+                                  leaves_fast=leaves_fast, cross=cross)
+    return quads, pal_out
+
+
+def quad_normal(verts):
+    p0, p1, p2, p3 = [np.asarray(v, float) for v in verts]
+    n = np.cross(p1 - p0, p2 - p0)
+    if np.allclose(n, 0):
+        n = np.cross(p1 - p0, p3 - p0)
+    return n / np.linalg.norm(n)
+
+
+def _is_diagonal(n):
+    """法向在水平面内且不与坐标轴平行 = 交叉面片的对角面片。"""
+    return abs(n[1]) < 1e-6 and abs(n[0]) > 1e-6 and abs(n[2]) > 1e-6
+
+
 def quad_face(verts, d):
     """校验 4 顶点共面且法向与 dir 一致（外向 CCW）。"""
     p0, p1, p2, p3 = [np.asarray(v, float) for v in verts]
@@ -152,6 +178,16 @@ class TestMesher(unittest.TestCase):
         # 顶点局部坐标应在 [0,1]
         for verts, *_ in quads:
             self.assertTrue(verts.min() >= 0 and verts.max() <= 1)
+
+    def test_cross_plant_two_diagonal_faces(self):
+        # 交叉面片植物只发射 2 个对角面片：Blender 默认双面渲染，够用。
+        # 回归：曾对每个对角面片再补一层反向绕序（共 4 面）——两者共面重叠 -> Z-Fighting。
+        quads, _pal = mesh_single_cross({(0, 1, 0): "minecraft:poppy"})
+        diag = [q for q in quads if _is_diagonal(quad_normal(q[0]))]
+        self.assertEqual(len(diag), 2)
+        # 两个对角面片必须是两条不同的对角线（而非同一条被画两次）
+        keys = {frozenset(tuple(int(c) for c in v) for v in q[0]) for q in diag}
+        self.assertEqual(len(keys), 2)
 
     def test_two_stones_merge_x(self):
         quads, pal = mesh_single({(0, 0, 0): "minecraft:stone", (1, 0, 0): "minecraft:stone"})
@@ -267,7 +303,60 @@ class TestMesher(unittest.TestCase):
         self.assertGreater(g.max(), r.max())  # 叶子绿色 tint
 
 
-# ------------------------------------------------------------ 流体几何 ----
+# -------------------------------------------- 区块组（R4 跨区块贪心合并） ----
+
+def _plate_payload():
+    """16×16×1 石头平板（y=0），用于观察跨区块合并。"""
+    pal, idx = block_idx({(x, 0, z): "minecraft:stone"
+                          for x in range(16) for z in range(16)}, "x")
+    return make_payload(secs=[(pal, idx)])
+
+
+class TestChunkGroup(unittest.TestCase):
+    """R4：区块组内跨区块贪心合并 + 多区块网格拼接。"""
+
+    def test_group_merges_across_chunk_border(self):
+        ks = {(dx, dz): _plate_payload() for dx in (0, 1) for dz in (0, 1)}
+        quads, _pal, _, _ = mesher.mesh_payload(ks, group=2)
+        # 32×32 平板：顶 / 底 / 四侧各 1 个矩形（组内跨区块边界合并）
+        self.assertEqual(len(quads), 6)
+        top = [q for q in quads if q[1] == 2][0][0]
+        self.assertAlmostEqual(float(top[:, 0].max()), 32.0)
+        self.assertAlmostEqual(float(top[:, 2].max()), 32.0)
+        # 逐区块单独网格化：每块 6 面 → 24 面，且边界处各自留面
+        single = sum(len(mesher.mesh_payload({(0, 0): ks[(dx, dz)]})[0])
+                     for dx in (0, 1) for dz in (0, 1))
+        self.assertEqual(single, 24)
+
+    def test_group_ring_culls_group_border_faces(self):
+        """组外圈一格参与剔除：组边界与邻居同高时不再生成侧面。"""
+        ks = {(dx, dz): _plate_payload() for dx in (0, 1) for dz in (0, 1)}
+        self.assertEqual(len(mesher.mesh_payload(ks, group=2)[0]), 6)
+        ring = dict(ks)
+        for key in ((2, 0), (2, 1), (0, 2), (1, 2)):
+            ring[key] = _plate_payload()
+        quads, _pal, _, _ = mesher.mesh_payload(ring, group=2)
+        # 组外同高地板剔除 +X / +Z 两个组边界侧面 -> 顶 + 底 + 两个侧面
+        self.assertEqual(len(quads), 4)
+
+    def test_merge_geos_offsets_and_materials(self):
+        quads, pal = mesh_single({(0, 0, 0): "minecraft:stone"})
+        verts = np.array([q[0] for q in quads], np.float32)
+        dirs = np.array([q[1] for q in quads], np.uint8)
+        blks = np.array([q[2] for q in quads], np.uint16)
+        aos = np.array([q[3] for q in quads], np.uint8)
+        geo = mesher.geo_from_arrays(verts, dirs, blks, aos, [n for _, n in pal])
+        merged = mesher.merge_geos([geo, geo, geo],
+                                   [(0, 0, 0), (16, 0, 0), (0, 0, 16)])
+        self.assertEqual(merged["nq"], geo["nq"] * 3)
+        self.assertEqual(merged["tris"], merged["nq"] * 2)
+        self.assertEqual(len(merged["mats"]), len(geo["mats"]))      # 材质去重
+        self.assertEqual(int(merged["mat_idx"].max()), len(geo["mats"]) - 1)
+        self.assertAlmostEqual(float(merged["verts"][:, 0].max()),
+                               float(geo["verts"][:, 0].max()) + 16.0)
+        self.assertEqual(merged["vcol"].shape, (merged["nq"] * 4, 4))
+
+
 
 def fluid_block_idx(cells):
     """{(x,y,z): 状态名} -> (palette, 4096 索引)；class 按 base 名查共享表。"""
@@ -620,8 +709,9 @@ class TestFluidVanillaConformance(unittest.TestCase):
 class TestFluidModelOverlap(unittest.TestCase):
     """回归：资产包给液体注入的整方块烘焙模型必须被剔除（否则与流体几何重叠）。
 
-    pack.use_model 只看模型占空比、与 class 无关，水/岩浆在真实资产包里同样是
-    use_model=True（实测 dist/assets.mcba：water/lava classify=5 use_model=True）。"""
+    pack.use_model 只表示"模型不是简单整立方体"、与 class 无关，水/岩浆在真实
+    资产包里同样是 use_model=True（实测 dist/assets.mcba：water/lava
+    classify=5 use_model=True）。"""
 
     class _FakePack(object):
         """最小资产包替身：仅水有烘焙模型（一整格立方体）。"""
@@ -631,10 +721,11 @@ class TestFluidModelOverlap(unittest.TestCase):
             self.variants = [[(cube, 0, 0, -1, 0, ((0.0, 0.0),) * 4)]]
 
         def use_model(self, block):
-            return block == "minecraft:water"
+            # mesher 传方块状态全名（v3 按状态解析），真实包会按基础名兜底
+            return B.base_name(block) == "minecraft:water"
 
         def variant_indices(self, block, props=None):
-            return [0] if block == "minecraft:water" else []
+            return [0] if B.base_name(block) == "minecraft:water" else []
 
     def _payload(self):
         pal = [(0, "minecraft:air"), (3, "minecraft:water[level=0]"), (1, "minecraft:stone")]

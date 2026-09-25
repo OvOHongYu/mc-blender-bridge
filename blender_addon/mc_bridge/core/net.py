@@ -121,6 +121,15 @@ class ApiClient:
                            {"dim": dim, "cx0": cx0, "cz0": cz0, "cx1": cx1, "cz1": cz1})
         return codec.decode_versions(buf)
 
+    def entities(self, dim, cx, cz, ymin=-64, ymax=320):
+        """区块内实体列表（R5）：{entities: [{id, Pos, ...}]}；JSON。"""
+        status, _, data = self._request(
+            "/api/entities", {"dim": dim, "cx": cx, "cz": cz,
+                              "ymin": ymin, "ymax": ymax})
+        if status != 200:
+            raise ApiError(f"entities {dim}/{cx}/{cz} -> {status}")
+        return json.loads(data).get("entities") or []
+
     def texture_png(self, block, face):
         status, headers, data = self._request(
             "/api/texture", {"block": block, "face": face})
