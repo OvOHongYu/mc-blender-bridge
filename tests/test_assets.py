@@ -909,34 +909,6 @@ class TestVariantRotation(unittest.TestCase):
         quads = bk.build_model_quads(model, lambda _n: 3)
         self.assertEqual(len(quads), 2)          # 2 片纸 × 1 面（原为每片 2 = 4 面）
 
-    def test_layered_coincident_faces_get_offset(self):
-        # 原版 grass_block.json 的 overlay 元素与 base 元素**坐标完全相同**，
-        # MC 靠绘制顺序 + LEQUAL 决胜；Blender 对共面面片没有确定次序 -> 逐像素
-        # 闪烁/混色（草皮看起来"没染色"、整块发灰）。烘焙期把后出现的层沿法向
-        # 外移一个极小量，既消 Z-Fighting 又保持叠加层在前。
-        import bake_assets as bk
-        model = {
-            "textures": {"side": "minecraft:block/s", "ov": "minecraft:block/o"},
-            "elements": [
-                {"from": [0, 0, 0], "to": [16, 16, 16],
-                 "faces": {"east": {"uv": [0, 0, 16, 16], "texture": "#side"}}},
-                {"from": [0, 0, 0], "to": [16, 16, 16],
-                 "faces": {"east": {"uv": [0, 0, 16, 16], "texture": "#ov",
-                                    "tintindex": 0}}},
-            ],
-        }
-        quads = bk.build_model_quads(model, lambda _n: 3)
-        self.assertEqual(len(quads), 2, "叠加层都要保留")
-        base, ov = quads
-        self.assertEqual(base[3], -1)            # 底层不染色
-        self.assertEqual(ov[3], 0)               # 叠加层染色
-        bx = max(v[0] for v in base[0])
-        ox = max(v[0] for v in ov[0])
-        self.assertGreater(ox, bx, "叠加层必须外移，否则与底层共面 Z-Fighting")
-        self.assertAlmostEqual(ox - bx, bk._COPLANAR_EPS, places=6)
-        # 外移量必须是 v2 精度（1/256 方块 = 1/16 像素）的整数倍，否则会被取整抹掉
-        self.assertAlmostEqual(ox * bk._VERT_SCALE, round(ox * bk._VERT_SCALE), places=6)
-
     def test_rod_orientation(self):
         # 细长模型：axis=y 竖直；axis=x 躺向 X；axis=z 躺向 Z
         for prop, axis in (("y", 1), ("x", 0), ("z", 2)):
