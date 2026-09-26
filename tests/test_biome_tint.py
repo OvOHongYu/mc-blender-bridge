@@ -253,15 +253,15 @@ class _OverlayPack:
     def biome_tint(self, name):
         return None
 
-    def cube_overlay_extras(self, vis):
-        return [q for vi in vis for q in self.variants[vi]][6:]
+    def overlay_faces(self, vis):
+        return {2: (11, True)}           # 侧面叠加层：贴图 11 且需要染色
 
 
 class TestOverlayHandling:
-    """草地叠加层：基底走贪心合并，叠加层单独注入且沿法向推出。
+    """叠加层改为「材质内合成」：零额外几何、零共面、零推出。
 
-    否则要么丢叠加层（侧面草皮显示成基底贴图里烘焙的平原绿），要么放弃合并
-    （实测草密集区块几何 561 -> 1264）。"""
+    着色器里做 base x (1-ov.a) + ov.rgb x ov.a x tint，因此 tint 仍随群系变化，
+    基底不被染色；代价只是多一个材质（每个带叠加层的面组一个）。"""
 
     def _vol(self):
         cls = np.zeros((18, 6, 18), np.uint8)
@@ -269,45 +269,64 @@ class TestOverlayHandling:
         cls[1:17, 2, 1:17] = 1
         return cls, gid
 
-    def test_cube_overlay_extras_detects_layer(self):
-        import bake_assets                                    # noqa: E402
+    def test_real_pack_detects_grass_overlay(self):
         from mc_bridge.core import assets as AS               # noqa: E402
-        assert hasattr(AS.AssetPack, "cube_overlay_extras")
-        # 用假包的同构数据结构直接验证判定逻辑（真包在 test_assets 里走烘焙）
+        assert hasattr(AS.AssetPack, "overlay_faces")
         p = _OverlayPack()
-        extras = AS.AssetPack.cube_overlay_extras(p, [0])
-        assert len(extras) == 4, "应识别出 4 个侧向叠加层面"
-        assert all(q[3] == 0 for q in extras), "叠加层带 tintindex"
+        ov = AS.AssetPack.overlay_faces(p, [0])
+        assert ov == {2: (11, True)}, ov
 
-    def test_base_kept_on_greedy_path(self):
+    def test_fake_uv_mismatch_falls_back(self):
+        from mc_bridge.core import assets as AS               # noqa: E402
+        p = _OverlayPack()
+        # 把叠加层的 UV 改掉 -> 无法用单张 UV 合成 -> 必须返回 None（退回整模型注入）
+        base, ovl = p.variants[0][:6], p.variants[0][6:]
+        p.variants[0] = base + [(q[0], q[1], q[2], q[3], q[4], ((0, 1), (1, 1), (1, 0), (0, 0)))
+                                for q in ovl]
+        assert AS.AssetPack.overlay_faces(p, [0]) is None
+
+    def test_no_extra_geometry(self):
         cls, gid = self._vol()
         pack = _OverlayPack()
         quads, models = M.mesh_padded(cls, gid, with_ao=False,
                                      palette=[(1, "minecraft:grass_block")],
                                      pack=pack)
-        assert quads, "基底必须仍由贪心路径产出（否则草顶失去合并）"
+        assert not models, "叠加层不再以几何形式注入"
         top = [q for q in quads if q[1] == 2]
-        assert top, "顶面应存在"
-        # 16x16 的平台顶面应合并成 1 个四边形（不是每格一个）
-        assert len(top) == 1, len(top)
+        assert len(top) == 1, "16x16 草顶仍应合并成 1 个四边形"
 
-    def test_overlay_injected_and_pushed(self):
+    def test_material_carries_overlay(self):
         cls, gid = self._vol()
         pack = _OverlayPack()
-        _q, models = M.mesh_padded(cls, gid, with_ao=False,
-                                   palette=[(1, "minecraft:grass_block")],
-                                   pack=pack)
-        ovl = [m for m in models if m[2] == 11]
-        assert ovl, "叠加层必须被注入"
-        # 环边格（平台四周）的叠加层沿法向推出：-X 面 x 应为 -0.32
-        negx = [m for m in ovl if m[1] == 1]
-        assert negx
-        xs = [v[0] for v in negx[0][0]]
-        assert abs(min(xs) + M._OVERLAY_PUSH) < 1e-6, min(xs)
+        q, _m = M.mesh_padded(cls, gid, with_ao=False,
+                              palette=[(1, "minecraft:grass_block")], pack=pack)
+        verts = np.array([x[0] for x in q], np.int16).reshape(-1, 4, 3)
+        dirs = np.array([x[1] for x in q], np.uint8)
+        blks = np.array([x[2] for x in q], np.uint16)
+        aos = np.array([x[3] for x in q], np.uint8).reshape(-1, 4)
+        geo = M.geo_from_arrays(verts, dirs, blks, aos,
+                                ["minecraft:grass_block"], pack=pack)
+        side = [m for m in geo["mats"] if m[2] == "side"]
+        assert side and side[0][3] == 11, geo["mats"]
+        # 顶面不带叠加层
+        top = [m for m in geo["mats"] if m[2] == "top"]
+        assert top and top[0][3] is None, geo["mats"]
 
-    def test_push_is_subpixel(self):
-        blk = M._OVERLAY_PUSH / 16.0
-        assert 0 < blk < 0.05, blk
+    def test_vertex_color_alpha_is_ao(self):
+        """alpha 必须存 AO（合成公式要用 AO 单独乘基底部分）。"""
+        cls, gid = self._vol()
+        pack = _OverlayPack()
+        q, _m = M.mesh_padded(cls, gid, with_ao=True,
+                              palette=[(1, "minecraft:grass_block")], pack=pack)
+        verts = np.array([x[0] for x in q], np.int16).reshape(-1, 4, 3)
+        dirs = np.array([x[1] for x in q], np.uint8)
+        blks = np.array([x[2] for x in q], np.uint16)
+        aos = np.array([x[3] for x in q], np.uint8).reshape(-1, 4)
+        geo = M.geo_from_arrays(verts, dirs, blks, aos,
+                                ["minecraft:grass_block"], pack=pack)
+        vc = np.asarray(geo["vcol"]).reshape(-1, 4, 4)
+        shade = np.take(np.array(M.AO_CURVE, np.float32), aos)
+        assert np.array_equal(vc[..., 3], np.clip(shade * 255, 0, 255).astype(np.uint8))
 
 
 class TestMeshBiomeKey:

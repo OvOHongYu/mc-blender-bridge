@@ -86,13 +86,18 @@ def _transparent(block):
     return cls in (B.LIQUID, B.CUTOUT, B.TRANSPARENT)
 
 
-def get_material(block, facegrp, tex_fetcher=None):
+def get_material(block, facegrp, tex_fetcher=None, overlay=None):
     """主线程调用：返回材质，贴图来源优先级 资产包 > 服务端拉取。
-    tex_fetcher(block, facegrp) -> PNG bytes（后台线程执行）。"""
+    tex_fetcher(block, facegrp) -> PNG bytes（后台线程执行）。
+
+    overlay = 叠加层贴图 id（如草方块侧面的 side_overlay）：此时材质在着色器里
+    把两层"合并"成一张面 —— 基底 + 叠加层 x tint（tint 仍来自顶点色，因此仍随
+    群系变化），不新增任何几何。"""
     global _fetcher_ref
     if tex_fetcher is not None:
         _fetcher_ref = tex_fetcher
-    name = material_name(block, facegrp)
+    name = material_name(block, facegrp) + (
+        "" if overlay is None else "_ov%d" % overlay)
     mat = bpy.data.materials.get(name)
     if mat is not None and _has_image_node(mat):
         return mat
@@ -101,6 +106,12 @@ def get_material(block, facegrp, tex_fetcher=None):
         _setup_placeholder(mat, block)
     # 1. 本地资产包（烘焙贴图）
     tid = _pack_face_tex(block, facegrp)
+    if tid is not None and overlay is not None:
+        pack = _pack()
+        if pack is not None:
+            _wire_overlay(mat, _pack_image(pack, tid), _pack_image(pack, overlay),
+                          transparent=_tex_has_alpha(pack, tid))
+            return mat
     if tid is not None:
         _apply_pack_texture(mat, block, tid)
         return mat
@@ -116,10 +127,11 @@ def get_material(block, facegrp, tex_fetcher=None):
 
 def get_material_for(desc, tex_fetcher=None):
     """材质描述符 -> 材质。
-    ("block", 方块名, facegrp) 或 ("tex", texId)。"""
+    ("block", 方块名, facegrp[, 叠加层贴图id]) 或 ("tex", texId)。"""
     if desc[0] == "tex":
         return get_model_material(int(desc[1]))
-    return get_material(desc[1], desc[2], tex_fetcher)
+    overlay = desc[3] if len(desc) > 3 else None
+    return get_material(desc[1], desc[2], tex_fetcher, overlay)
 
 
 def _pack():
@@ -270,6 +282,66 @@ def _wire(mat, img, block, transparent=False):
             mat.blend_method = 'BLEND'
         else:
             mat.blend_method = 'CLIP'
+    else:
+        mat.blend_method = 'OPAQUE'
+
+
+def _wire_overlay(mat, img_base, img_ov, transparent=False):
+    """叠加层合成（草方块侧面那类「基底 + 带 tintindex 的 overlay」两层合一）。
+
+    单个面片、单张贴图集就够，靠着色器把两层合并（与原版语义一致）：
+
+        final = [ base x (1 - ov.a) + ov.rgb x ov.a x tint ] x AO
+
+    其中 tint/AO 来自顶点色（rgb = tint x AO、a = AO），因此 tint 仍然随群系变化，
+    而基底（泥土）不会被染色。这样既不需要额外面片，也不存在共面 Z-Fighting。"""
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nodes, links = nt.nodes, nt.links
+    for n in list(nodes):
+        nodes.remove(n)
+    out = nodes.new('ShaderNodeOutputMaterial')
+    bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+    tex_b = nodes.new('ShaderNodeTexImage')
+    tex_b.image = img_base
+    tex_o = nodes.new('ShaderNodeTexImage')
+    tex_o.image = img_ov
+    for t in (tex_b, tex_o):
+        for attr, val in (("extension", 'REPEAT'), ("interpolation", 'Closest')):
+            try:
+                setattr(t, attr, val)
+            except (TypeError, AttributeError):
+                pass
+    vcol = nodes.new('ShaderNodeVertexColor')
+    vcol.layer_name = "Col"
+    # ov.rgb x tint
+    m_tint = nodes.new('ShaderNodeMixRGB')
+    m_tint.blend_type = 'MULTIPLY'
+    m_tint.inputs["Fac"].default_value = 1.0
+    # base x (1-ov.a) + (ov.rgb x tint) x ov.a
+    m_ov = nodes.new('ShaderNodeMixRGB')
+    m_ov.blend_type = 'MIX'
+    # x AO（顶点色 alpha）
+    m_ao = nodes.new('ShaderNodeMixRGB')
+    m_ao.blend_type = 'MULTIPLY'
+    m_ao.inputs["Fac"].default_value = 1.0
+    try:
+        bsdf.inputs["Specular IOR Level"].default_value = 0.0
+    except TypeError:
+        pass
+    bsdf.inputs["Roughness"].default_value = 1.0
+    links.new(tex_o.outputs["Color"], m_tint.inputs["Color1"])
+    links.new(vcol.outputs["Color"], m_tint.inputs["Color2"])
+    links.new(tex_b.outputs["Color"], m_ov.inputs["Color1"])
+    links.new(m_tint.outputs["Color"], m_ov.inputs["Color2"])
+    links.new(tex_o.outputs["Alpha"], m_ov.inputs["Fac"])
+    links.new(m_ov.outputs["Color"], m_ao.inputs["Color1"])
+    links.new(vcol.outputs["Alpha"], m_ao.inputs["Color2"])
+    links.new(m_ao.outputs["Color"], bsdf.inputs["Base Color"])
+    links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    if transparent:
+        links.new(tex_b.outputs["Alpha"], bsdf.inputs["Alpha"])
+        mat.blend_method = 'CLIP'
     else:
         mat.blend_method = 'OPAQUE'
 

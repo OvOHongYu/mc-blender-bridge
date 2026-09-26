@@ -21,6 +21,8 @@ VERSION = 6                  # 当前格式版本（读取端兼容 v1..v6）
 _SUPPORTED = (1, 2, 3, 4, 5, 6)
 _V2_SCALE = 16.0             # v2 顶点 -> 1/16 方块单位
 _NONE_TEX = 0xFFFF           # 变体级信息里"该面无贴图"的哨兵
+_DIR_FACEGRP = {2: 0, 3: 1}  # 面方向 -> 面组下标（0 top / 1 bottom），其余归 2 side
+_FACEGRP_DIRS = {0: {2}, 1: {3}, 2: {0, 1, 4, 5}}   # 各面组包含的面方向集合
 
 # quad = (verts tuple[(x,y,z)]*4, dir u8, tex u16, tint i8, cull u8, uvs tuple[(u,v)]*4)
 
@@ -215,19 +217,23 @@ class AssetPack:
         return tuple(tuple(((x >> sh) & 0xFF) / 255.0 for sh in (16, 8, 0))
                      for x in v)
 
-    def cube_overlay_extras(self, vis):
-        """变体索引列表 -> 叠加层面片列表；不是"整立方体 + 叠加层"则返回 None。
+    def overlay_faces(self, vis):
+        """整立方体 + 叠加层 -> {面组: (叠加层贴图id, 是否需染色)}；不适用返回 None。
 
         草方块这类方块的模型是「整立方体基底 + 与基底**完全共面**的叠加层元素」
-        （`grass_block_side_overlay`，带 tintindex）。这类方块应当：
-          - 基底面继续走贪心合并（草顶是最高频的面，合并能省大量几何）；
-          - 只把叠加层单独注入（它只出现在暴露的侧面上，量很小）。
-        否则要么丢叠加层（侧面草皮变成基底贴图里烘焙的平原绿），要么放弃合并
-        （实测草密集区块几何 561 -> 1264）。
+        （`grass_block_side_overlay`，带 tintindex），原版靠分层绘制顺序把叠加层画在
+        基底之上、并且**只给叠加层染色**（基底保持泥土色）。
 
-        判定：把面按顶点集分组，只有"存在共面重复"且"去重后的面方向恰好覆盖
-        6 个方向（整立方体）"时才认定为叠加层结构；其余情况一律返回 None，
-        由调用方整模型注入（避免误判）。"""
+        这里不新增几何，而是把"合并两层"交给材质在着色器里做：
+            final = [ base x (1 - overlay.a) + overlay.rgb x overlay.a x tint ] x AO
+        因此要求叠加层与它覆盖的基底面 **UV 相同**（这样一张 UV 图就能同时采样两层）。
+
+        全部满足才返回映射；否则返回 None，由调用方退回整模型注入：
+          - 去重后恰好是完整 6 面整立方体（否则不是"立方体 + 叠加层"结构，
+            例如 spawner 的 6 层内外壁）；
+          - 每个叠加层的 UV 与对应基底面一致；
+          - 同一面组的叠加层必须**覆盖该面组的全部方向**且贴图/染色标记一致
+            （合成是按面组整体生效的，只覆盖部分方向会错染其余方向）。"""
         quads = [q for vi in vis for q in self.variants[vi]]
         by_vs = {}
         order = []
@@ -237,17 +243,32 @@ class AssetPack:
                 by_vs[key] = []
                 order.append(key)
             by_vs[key].append(q)
-        extras = []
-        base_dirs = []
+        base, extras = [], []
         for key in order:
             gs = by_vs[key]
-            base_dirs.append(int(gs[0][1]))
+            base.append(gs[0])
             extras.extend(gs[1:])
         if not extras:
             return None
-        if sorted(base_dirs) != [0, 1, 2, 3, 4, 5]:
-            return None            # 去重后不是整立方体 -> 不按叠加层处理
-        return extras
+        if sorted(int(q[1]) for q in base) != [0, 1, 2, 3, 4, 5]:
+            return None
+        base_by_dir = {int(q[1]): q for q in base}
+        got = {}
+        for q in extras:
+            bq = base_by_dir.get(int(q[1]))
+            if bq is None or bq[5] != q[5]:
+                return None                      # UV 不同 -> 单张 UV 无法合成
+            fg = _DIR_FACEGRP.get(int(q[1]), 2)
+            got.setdefault(fg, {})[int(q[1])] = (int(q[2]), int(q[3]) >= 0)
+        out = {}
+        for fg, by_dir in got.items():
+            if set(by_dir) != _FACEGRP_DIRS[fg]:
+                return None                      # 只覆盖部分方向 -> 不能用整面组合成
+            vals = set(by_dir.values())
+            if len(vals) != 1:
+                return None                      # 同面组各方向的叠加层不一致
+            out[fg] = vals.pop()
+        return out
 
     def default_faces(self, block):
         """(top, side, bottom) 贴图 id 或 None。传入方块状态名时按其状态解析。"""

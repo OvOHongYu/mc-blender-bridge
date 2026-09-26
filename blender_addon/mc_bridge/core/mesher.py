@@ -21,10 +21,6 @@ import numpy as np
 from . import blocks as B
 
 AO_CURVE = (0.45, 0.65, 0.85, 1.0)
-# 叠加层（如草方块侧面的 side_overlay）与基底共面时沿法向推出的距离，单位 1/16 方块。
-# 原版靠分层绘制顺序决胜，Blender 无此次序 -> Z-Fighting。0.32/16 = 2% 方块，
-# 写入 v2 精度后为 5/256 方块，肉眼不可见。
-_OVERLAY_PUSH = 0.32
 DIRS = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
 DIR_VEC = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
@@ -135,11 +131,28 @@ def _biome_block_array(payload, bio_ids, bio_names):
     return out
 
 
+def _overlay_of(pack, name):
+    """方块的「叠加层」信息（{面组: (贴图id, 是否染色)}）；不适用返回 None。"""
+    if pack is None:
+        return None
+    f = getattr(pack, "overlay_faces", None)
+    if f is None:
+        return None
+    try:
+        vis = pack.variant_indices(B.base_name(name), B.props_of(name))
+        return f(vis) if vis else None
+    except Exception:
+        return None
+
+
 def _palette_tints(palette, pack):
     """-> (tints[n_pal][facegrp][rgb], kinds[n_pal][facegrp], need[n_pal])。
 
     tints 是平原常量色（无群系数据时的兜底）；kinds 是染色类别（0 无 / 1 草 /
-    2 叶 / 3 水，供按群系取色）；need 表示该方块是否需要按群系拆分贪心合并。"""
+    2 叶 / 3 水，供按群系取色）；need 表示该方块是否需要按群系拆分贪心合并。
+
+    「整立方体 + 叠加层」的方块（草方块）即使基底面不染色，只要叠加层带 tintindex，
+    该面组也必须算作染色面 —— 着色器合成时 tint 只作用于叠加层，基底不受影响。"""
     n = len(palette)
     tints = np.ones((n, 3, 3), np.float32)
     kinds = np.zeros((n, 3), np.uint8)
@@ -147,11 +160,13 @@ def _palette_tints(palette, pack):
     for i, name in enumerate(palette):
         mask = (pack.tint_mask(name)
                 if pack is not None and hasattr(pack, "tint_mask") else None)
+        ov = _overlay_of(pack, name)
         k = B.tint_kind(name)
         for fg in range(3):
             if mask is None:
                 t = B.tint_of(name)
-            elif (mask >> fg) & 1:
+            elif (mask >> fg) & 1 or (ov is not None
+                                      and ov.get(fg, (0, False))[1]):
                 t = B.default_tint(name)
             else:
                 t = None
@@ -244,7 +259,6 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
                            cls).astype(np.uint8)
     quads = []
     modeled = {}        # gi -> 面片列表：整模型注入（这些方块的贪心面被丢弃）
-    overlays = {}       # gi -> 面片列表：只注入叠加层（贪心基底面保留）
     if pack is not None and palette is not None:
         for gi, ent in enumerate(palette):
             ecls = int(ent[0])
@@ -260,16 +274,12 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
             vis = pack.variant_indices(B.base_name(name), B.props_of(name))
             if not vis:
                 continue
-            extras = None
-            splitter = getattr(pack, "cube_overlay_extras", None)
-            if splitter is not None:
-                extras = splitter(vis)
-            if extras is not None:
-                # 整立方体 + 叠加层：基底留给贪心合并（草顶最高频，合并省几何），
-                # 只单独注入叠加层（仅出现在暴露侧面，量极小）
-                overlays[gi] = extras
-            else:
-                modeled[gi] = [q for vi in vis for q in pack.variants[vi]]
+            # 「整立方体 + 叠加层」结构不注入几何：基底留给贪心合并，叠加层由材质
+            # 在着色器里合成（见 AssetPack.overlay_faces / mats._wire_overlay）。
+            # 零额外几何、零共面、零推出，且 tint 仍然动态。
+            if _overlay_of(pack, name) is not None:
+                continue
+            modeled[gi] = [q for vi in vis for q in pack.variants[vi]]
     for d in range(3):
         C = np.moveaxis(cls, d, 0)
         G = np.moveaxis(gid, d, 0)
@@ -378,20 +388,11 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
         va = np.array([q[0] for q in quads], np.int16).reshape(-1, 4, 3)
         quads = [(va[i], q[1], q[2], q[3]) for i, q in enumerate(quads)]
     models = _emit_models(cls, gid, modeled) if modeled else []
-    if overlays:
-        # 叠加层与贪心基底**共面**（原版模型里两者坐标完全相同）。原版靠分层绘制
-        # 顺序 + LEQUAL 决胜，Blender 没有这个次序 -> Z-Fighting，草皮那层可能被
-        # 基底盖住而显示成基底贴图里烘焙的平原绿、与顶面不一致。这里沿面法向微推
-        # 5/256 方块（= 2% 方块，肉眼不可见，足以脱离深度精度）。
-        models.extend(_emit_models(cls, gid, overlays, push=_OVERLAY_PUSH))
     return quads, models
 
 
-def _emit_models(cls, gid, entries, push=0.0):
-    """对 entries（gi -> 面片列表）里的格子发射烘焙模型几何（1/16 方块单位）。
-
-    push > 0 时沿面法向（DIR_VEC[d]，已随 blockstate 旋转变换过）推出该距离，
-    用于消解与贪心基底共面的叠加层 Z-Fighting。"""
+def _emit_models(cls, gid, entries):
+    """对 entries（gi -> 面片列表）里的格子发射烘焙模型几何（1/16 方块单位）。"""
     ids = np.array(sorted(entries), np.uint16)
     mask = np.isin(gid, ids)
     mask[0, :, :] = mask[-1, :, :] = False
@@ -406,13 +407,7 @@ def _emit_models(cls, gid, entries, push=0.0):
                 dv = DIR_VEC[cull - 1]
                 if cls[x + dv[0], y + dv[1], z + dv[2]] == B.OPAQUE:
                     continue
-            if push:
-                nx, ny, nz = DIR_VEC[d]
-                dx, dy, dz = nx * push, ny * push, nz * push
-            else:
-                dx = dy = dz = 0.0
-            wv = tuple((ox + v[0] + dx, oy + v[1] + dy, oz + v[2] + dz)
-                       for v in verts)
+            wv = tuple((ox + v[0], oy + v[1], oz + v[2]) for v in verts)
             out.append((wv, d, tex, tint, cull, uv, gi, (3, 3, 3, 3)))
     return out
 
@@ -623,13 +618,21 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
         vcol = np.empty((nq, 4, 4), np.uint8)
         vcol[:, :, :3] = np.clip(rgb[:, None, :] * shade[:, :, None] * 255.0,
                                  0, 255).astype(np.uint8)
-        vcol[:, :, 3] = 255
+        # alpha 存 AO：叠加层材质要在着色器里合成
+        # [ base x (1-ov.a) + ov x ov.a x tint ] x AO，
+        # 需要 AO 与 tint 分开（rgb = tint x AO，a = AO），基底部分只乘 a。
+        vcol[:, :, 3] = np.clip(shade * 255.0, 0, 255).astype(np.uint8)
 
-        # 材质槽: (name, facegrp) —— 组合键向量化求 unique
+        # 材质槽: (name, facegrp, 叠加层贴图) —— 组合键向量化求 unique
         key = blocks_.astype(np.int32) * 4 + facegrp
         uniq, inv = np.unique(key, return_inverse=True)
-        mats = [("block", palette[int(k) >> 2], ("top", "bottom", "side")[int(k) & 3])
-                for k in uniq]
+        ovs = [_overlay_of(pack, n) for n in palette]
+        mats = []
+        for k in uniq:
+            pi, fg = int(k) >> 2, int(k) & 3
+            ov = ovs[pi]
+            mats.append(("block", palette[pi], ("top", "bottom", "side")[fg],
+                         ov[fg][0] if ov and fg in ov else None))
         parts.append((vf.reshape(-1, 3), uv.reshape(-1, 2), vcol.reshape(-1, 4),
                       inv.astype(np.uint16), mats))
 
@@ -660,7 +663,7 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
         vcol = np.empty((nm, 4, 4), np.uint8)
         vcol[:, :, :3] = np.clip(mcol[:, None, :] * mshade[:, :, None] * 255.0,
                                  0, 255).astype(np.uint8)
-        vcol[:, :, 3] = 255
+        vcol[:, :, 3] = np.clip(mshade * 255.0, 0, 255).astype(np.uint8)
         uniq, inv = np.unique(mtex, return_inverse=True)
         mats = [("tex", int(t)) for t in uniq]
         parts.append((mv, muv, vcol.reshape(-1, 4), inv.astype(np.uint16), mats))
