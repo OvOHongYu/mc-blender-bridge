@@ -28,6 +28,7 @@ def connect(p):
         leaves_fast=(p.leaves == "fast"), group=int(p.group),
         inflight=p.inflight,
         use_models=getattr(p, "use_models", True),
+        biome_tint=getattr(p, "biome_tint", True),
         version_interval=p.version_poll))
     state.set_runtime(client, scheduler, info, blocks)
     p.status = "已连接 %s (MC %s)" % (info.get("mod", "?"), info.get("mcVersion", "?"))

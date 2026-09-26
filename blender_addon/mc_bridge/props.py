@@ -11,6 +11,7 @@ _defaults = {
     "save_dir": "",
     "assets_path": "",
     "use_models": True,
+    "biome_tint": True,
     "auto_bind_camera": True,
     "dim": "minecraft:overworld",
     "r_load": 8,
@@ -57,6 +58,10 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                              description="连接时把当前场景相机设为 MCB_Root 的子物体，"
                                                          "整体变换时区块与相机同步移动")
     dim: bpy.props.StringProperty(name="维度", default=_defaults["dim"])
+    biome_tint: bpy.props.BoolProperty(name="按群系调色", default=_defaults["biome_tint"],
+                                       description="草/树叶/水按所在生物群系取原版染色（R8）。"
+                                                   "关闭后统一用平原常量色，且不再按群系拆分贪心矩形"
+                                                   "（面数更少、生成更快）。变更后需重新加载区块")
     r_load: bpy.props.IntProperty(name="加载半径", default=_defaults["r_load"], min=1, max=64,
                                   description="以锚点为中心的加载半径（区块）")
     r_unload: bpy.props.IntProperty(name="卸载半径", default=_defaults["r_unload"], min=2, max=96,

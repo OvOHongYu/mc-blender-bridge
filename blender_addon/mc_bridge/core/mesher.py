@@ -918,19 +918,25 @@ def mesh_payload(payloads, group=1, with_ao=True, leaves_fast=False,
 
 
 def mesh_payload_biome(payloads, group=1, with_ao=True, leaves_fast=False,
-                       pack=None, fluids=False):
+                       pack=None, fluids=False, biome=True):
     """(group+2)×(group+2) payload 字典 -> (quads, palette, y_bottom, models, biome)。
 
     group = 区块组边长：键 (dx,dz) ∈ [-1, group]，内圈 [0, group-1] 是组本体，
     外圈一格作剔除面用。group>1 时贪心矩形可跨区块边界合并（对象数按 group² 下降）。
 
     biome = (padded 群系 id, 查色表)，直接交给 geo_from_arrays 按格取色（R8）。
+    biome=False 时跳过群系解码与按群系拆分（统用常量色），返回的 biome 为 None
+    —— 对应面板上的「按群系调色」开关。
 
     fluids=True 时把液体的整方块面换成类原版流体几何（见上），并剔除资产包为
     液体注入的整方块烘焙模型（use_model 只表示"模型不是简单整立方体"、与
     class 无关，水/岩浆同样会命中），否则整方块与流体几何会在同一格重叠。"""
-    cls, gid, H, pal, bio, bio_names = assemble_padded(payloads, group,
-                                                       with_biome=True)
+    got = assemble_padded(payloads, group, with_biome=biome)
+    if biome:
+        cls, gid, H, pal, bio, bio_names = got
+    else:
+        cls, gid, H, pal = got          # with_biome=False 时只返回 4 项
+        bio, bio_names = None, []
     # 交叉面片: CUTOUT 且非树叶（与 Java 侧 BlockClassifier 规则一致）
     cross = np.zeros(len(pal), bool)
     for i, (c, name) in enumerate(pal):
@@ -938,7 +944,7 @@ def mesh_payload_biome(payloads, group=1, with_ao=True, leaves_fast=False,
     _tints, _kinds, need = _palette_tints([n for _c, n in pal], pack)
     quads, models = mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast,
                                 cross=cross, palette=pal, pack=pack,
-                                biome=bio, bio_need=need)
+                                biome=bio, bio_need=(need if biome else None))
     if fluids:
         liq_ids = {i for i, (c, _) in enumerate(pal) if c == B.LIQUID}
         if liq_ids:
@@ -947,7 +953,9 @@ def mesh_payload_biome(payloads, group=1, with_ao=True, leaves_fast=False,
             # 简单整立方体，与 class 无关）——必须一并剔除，否则与流体几何重叠
             models = [m for m in models if int(m[6]) not in liq_ids]
             quads.extend(_fluid_quads(cls, gid, pal))
-    return quads, pal, None, models, (bio, biome_lut(pack, bio_names))
+    # biome=False 时整个返回 None（否则下游会把 (None, 空 lut) 当成"有群系数据"）
+    return (quads, pal, None, models,
+            ((bio, biome_lut(pack, bio_names)) if biome else None))
 
 
 def shell_payload(payloads, center=(0, 0)):

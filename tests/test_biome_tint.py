@@ -329,6 +329,43 @@ class TestOverlayHandling:
         assert np.array_equal(vc[..., 3], np.clip(shade * 255, 0, 255).astype(np.uint8))
 
 
+class TestBiomeTintToggle:
+    """面板「按群系调色」开关（p.biome_tint）。
+
+    关掉后：不返回群系数据（于是 geo 用常量平原色）、且不按群系拆分贪心矩形。"""
+
+    def test_payload_biome_off_returns_none(self):
+        from test_codec_mesher import make_payload            # noqa: E402
+        pal = [(1, "minecraft:grass_block")]
+        pl = {(0, 0): make_payload(secs=[(pal, np.zeros(4096, np.uint16))])}
+        _q, _p, _y, _m, bio_on = M.mesh_payload_biome(pl, biome=True)
+        _q2, _p2, _y2, _m2, bio_off = M.mesh_payload_biome(pl, biome=False)
+        assert bio_on is not None, "开：应返回群系数据"
+        assert bio_off is None, "关：应返回 None（geo 便退回常量色）"
+
+    def test_geo_without_biome_uses_constant_tint(self):
+        verts = np.array([[[1, 1, 1], [1, 1, 2], [1, 2, 2], [1, 2, 1]]], np.int16)
+        dirs = np.array([0], np.uint8)                       # +X 面
+        blks = np.array([0], np.uint16)
+        aos = np.array([[3, 3, 3, 3]], np.uint8)
+        bio_ar = np.zeros((18, 6, 18), np.uint8)
+        bio_ar[1, :, :] = 1
+        lut = np.ones((3, 4, 3), np.float32)
+        lut[1, B.TINT_KIND_GRASS] = (0.1, 0.2, 0.3)          # 群系色刻意与原版常量色不同
+
+        off = M.geo_from_arrays(verts, dirs, blks, aos,
+                                ["minecraft:grass_block"], pack=_TintAllPack())
+        on = M.geo_from_arrays(verts, dirs, blks, aos,
+                               ["minecraft:grass_block"], pack=_TintAllPack(),
+                               biome=(bio_ar, lut))
+        v_off = np.asarray(off["vcol"]).reshape(-1, 4, 4)
+        v_on = np.asarray(on["vcol"]).reshape(-1, 4, 4)
+        assert tuple(int(x) for x in v_on[0, 0, :3]) == (25, 51, 76)   # 截断写入
+        # 关掉开关时退回共享表的平原常量色（而不是群系色）
+        const = tuple(int(c * 255) for c in B.default_tint("minecraft:grass_block"))
+        assert tuple(int(x) for x in v_off[0, 0, :3]) == const, v_off[0, 0, :3]
+
+
 class TestMeshBiomeKey:
     """合并键只在声明染色的方块上引入群系维度。"""
 

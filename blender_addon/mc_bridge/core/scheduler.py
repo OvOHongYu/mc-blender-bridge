@@ -34,6 +34,7 @@ class Params:
         self.ymax = kw.get("ymax", 320)
         self.mode = kw.get("mode", "mesh")           # mesh=模式B / raw=模式A
         self.use_models = kw.get("use_models", True)  # LOD0 用资产包烘焙模型
+        self.biome_tint = kw.get("biome_tint", True)  # 按群系调色（R8）
         self.leaves_fast = kw.get("leaves_fast", False)
         self.group = int(kw.get("group", 2))         # 区块组边长（1/2/4，R4 跨区块合并）
         self.inflight = kw.get("inflight", 3)
@@ -323,7 +324,7 @@ class Scheduler:
         from . import assets
         quads, pal, _, models, bio = mesher.mesh_payload_biome(
             payloads, group=g, with_ao=(lod == 0), leaves_fast=self.p.leaves_fast,
-            pack=assets.current(), fluids=True)
+            pack=assets.current(), fluids=True, biome=self.p.biome_tint)
         import numpy as np
         # 流体几何顶点是小数块坐标 -> 用 float32（整型会截断水面高度）
         verts = np.array([q[0] for q in quads], np.float32) if quads \
@@ -348,13 +349,18 @@ class Scheduler:
         for dx, dz in self._group_cells(gx, gz):
             if dx < 0 or dz < 0 or dx >= g or dz >= g:
                 continue
+            # 存档后端可由调用方决定是否要群系数据（net 后端由服务端决定，
+            # 返回后再按开关决定用不用）
+            kw = ({"biome": self.p.biome_tint}
+                  if getattr(self.client, "world", None) is not None else {})
             m = self.client.mesh(dim, gx + dx, gz + dz, self.p.ymin, self.p.ymax,
                                  lod=lod, ao=(lod == 0),
-                                 leaves=("fast" if self.p.leaves_fast else "fancy"))
+                                 leaves=("fast" if self.p.leaves_fast else "fancy"),
+                                 **kw)
             geos.append(geo_from_arrays(
                 m["verts"], m["dirs"], m["blocks"], m["aos"],
                 [n for _, n in m["palette"]], models=m.get("models"), pack=pack,
-                biome=m.get("biome")))
+                biome=(m.get("biome") if self.p.biome_tint else None)))
             offs.append((16.0 * dx, float(m.get("yBottom", self.p.ymin) - self.p.ymin),
                          16.0 * dz))
         if g == 1:

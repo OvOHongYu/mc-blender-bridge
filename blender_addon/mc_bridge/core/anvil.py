@@ -547,13 +547,18 @@ class SaveClient:
         """区块内实体 NBT 列表（entities/*.mca；渲染见 core/entities.py）。"""
         return self.world.entity_payload(dim, cx, cz)
 
-    def mesh(self, dim, cx, cz, ymin, ymax, lod=0, ao=None, leaves=None):
+    def mesh(self, dim, cx, cz, ymin, ymax, lod=0, ao=None, leaves=None,
+             biome=True):
         """本地网格（与模拟服务器同路径）；LOD2 走高度壳。
+
+        biome=False 时跳过群系解码、不做按群系拆分（面板「按群系调色」关闭），
+        返回的 "biome" 为 None，调用方据此退回常量色。
 
         网格产物 LRU 缓存：LOD 升降/相机回看时免重复 40ms+ 贪心合并。"""
         dim = norm_dim(dim)
         with_ao = True if ao is None else bool(ao)
-        key = (dim, cx, cz, ymin, ymax, lod, with_ao, leaves)
+        biome = bool(biome)
+        key = (dim, cx, cz, ymin, ymax, lod, with_ao, leaves, biome)
         with self.world.lock:
             hit = self._mesh_cache.get(key)
             if hit is not None:
@@ -572,12 +577,13 @@ class SaveClient:
             from . import assets
             pack = assets.current()
             cls, gid, H, pal, bio, bio_names = mesher.assemble_padded(
-                payloads, with_biome=True)
+                payloads, with_biome=biome)
             _tints, _kinds, need = mesher._palette_tints([n for _c, n in pal], pack)
             quads, models = mesher.mesh_padded(
                 cls, gid, with_ao=with_ao, leaves_fast=(leaves == "fast"),
-                palette=pal, pack=pack, biome=bio, bio_need=need)
-            bioinfo = (bio, mesher.biome_lut(pack, bio_names))
+                palette=pal, pack=pack, biome=bio,
+                bio_need=(need if biome else None))
+            bioinfo = (bio, mesher.biome_lut(pack, bio_names)) if biome else None
         nq = len(quads)
         verts = np.array([q[0] for q in quads], np.int16) if nq else np.zeros((0, 4, 3), np.int16)
         dirs = np.array([q[1] for q in quads], np.uint8)
