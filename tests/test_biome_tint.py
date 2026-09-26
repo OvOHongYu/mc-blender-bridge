@@ -177,6 +177,73 @@ class TestModelCells:
         assert tuple(int(x) for x in c[0]) == (1, 1, 1)
 
 
+class TestVertexColorColorSpace:
+    """F9：BYTE_COLOR 的 `.color` 是场景线性空间，写入前必须做 sRGB->线性。
+
+    否则把 sRGB 值当线性用，染色与 AO 会被整体提亮（实测约 2.9 倍），观感偏灰。
+    标定实验见 dist/_vcol_calib.py（已知灰贴图 × 已知顶点色，顶光 π）。"""
+
+    def _written(self, rgb):
+        import fake_bpy                                   # noqa: E402
+        fake_bpy.install()
+        from mc_bridge import importer                    # noqa: E402
+        geo = {
+            "nq": 1,
+            "verts": np.zeros((1, 4, 3), np.float32),
+            "uv": np.zeros((1, 4, 2), np.float32),
+            "vcol": np.array([[list(rgb) + [255]] * 4], np.uint8).reshape(4, 4),
+            "mat_idx": np.zeros(1, np.int32),
+            "mats": [("block", "minecraft:stone", "top")],
+        }
+        mesh = importer._build_mesh("T", geo)
+        col = mesh.color_attributes.get("Col")
+        assert col is not None
+        return list(col.data.color)
+
+    def test_byte_is_converted_from_srgb(self):
+        got = self._written((128, 128, 128))
+        # sRGB 128/255 = 0.502 -> 线性 0.2158
+        assert abs(got[0] - 0.2158) < 0.005, got[0]
+
+    def test_not_raw_srgb(self):
+        # 回归：退回"直接写 byte/255"时会是 0.502（明显偏亮）
+        got = self._written((128, 128, 128))
+        assert got[0] < 0.30, got[0]
+
+    def test_white_and_alpha_unchanged(self):
+        got = self._written((255, 255, 255))
+        assert abs(got[0] - 1.0) < 1e-6
+        assert abs(got[3] - 1.0) < 1e-6
+
+
+class TestOverlayPush:
+    """F10：同位置不同贴图的面（草方块侧面 overlay）要沿法向推出，避免 Z-Fighting。"""
+
+    _V = ((0, 0, 0), (0, 0, 16), (0, 16, 16), (0, 16, 0))     # -X 面
+    _UV = ((0, 0), (1, 0), (1, 1), (0, 1))
+
+    def _q(self, tex, tint):
+        return (self._V, 1, tex, tint, 2, self._UV)
+
+    def test_coincident_different_tex_pushed_along_normal(self):
+        out = bake_assets._dedupe_coincident([self._q(10, -1), self._q(11, 0)])
+        assert len(out) == 2, "贴图不同 -> 两份都保留"
+        assert out[0][0][0][0] == 0.0, "第一个（基底）不动"
+        assert abs(out[1][0][0][0] + bake_assets._OVERLAY_PUSH) < 1e-6, \
+            "第二个（overlay）应沿 -X 法向推出"
+
+    def test_identical_faces_still_deduped(self):
+        out = bake_assets._dedupe_coincident([self._q(10, -1), self._q(10, -1)])
+        assert len(out) == 1, "完全重复（零厚度模型正反面）仍应合并"
+
+    def test_push_is_subpixel(self):
+        # 单位是 1/16 方块（= 模型像素）：推出量须远小于 1 格（此处 ~1/50 格）
+        blk = bake_assets._OVERLAY_PUSH / 16.0
+        assert 0 < blk < 0.05, blk
+        # 且要能被 1/256 方块精度表达（非零整数单位）
+        assert round(bake_assets._OVERLAY_PUSH * 16) >= 1
+
+
 class TestMeshBiomeKey:
     """合并键只在声明染色的方块上引入群系维度。"""
 
