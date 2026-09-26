@@ -39,6 +39,7 @@ public final class ConformanceTest {
     public static void main(String[] args) throws Exception {
         Path fixtures = Path.of(System.getProperty("fixtures", "../tests/fixtures"));
         byte[] mcc1Fixture = Files.readAllBytes(fixtures.resolve("mcc1_sample.bin"));
+        byte[] mcc1BioFixture = Files.readAllBytes(fixtures.resolve("mcc1_biome_sample.bin"));
         byte[] mcm1Fixture = Files.readAllBytes(fixtures.resolve("mcm1_sample.bin"));
 
         // ---- 重建合成区块（与 gen_fixtures.build_world 相同布局）
@@ -106,6 +107,21 @@ public final class ConformanceTest {
                 List.of(new SectionData(pal, indices)));
         byte[] mcc1 = Mcc1Writer.write(payload);
         check("MCC1 与 Python 夹具逐字节一致", mcc1, mcc1Fixture);
+
+        // MCC1 v2：同一 Section 带 4×4×4 群系（x4>=2 沙漠，其余平原）
+        List<String> bioNames = List.of("minecraft:plains", "minecraft:desert");
+        byte[] bioIds = new byte[64];
+        for (int y4 = 0; y4 < 4; y4++) {
+            for (int z4 = 0; z4 < 4; z4++) {
+                for (int x4 = 0; x4 < 4; x4++) {
+                    bioIds[(y4 << 4) | (z4 << 2) | x4] = (byte) (x4 >= 2 ? 1 : 0);
+                }
+            }
+        }
+        ChunkPayload payloadBio = new ChunkPayload("overworld", 0, 0, 0,
+                List.of(new SectionData(pal, indices, bioNames, bioIds)));
+        check("MCC1 v2（群系）与 Python 夹具逐字节一致",
+                Mcc1Writer.write(payloadBio), mcc1BioFixture);
 
         // ---- 组装 padded 体积 (18,18,18)：邻居为空气
         byte[][][] pc = new byte[18][18][18];

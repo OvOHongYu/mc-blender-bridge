@@ -169,7 +169,8 @@ public final class ApiServer {
         int cx = q.getInt("cx"), cz = q.getInt("cz");
         int ymin = q.getInt("ymin", ChunkSnapshotService.WORLD_MIN_Y);
         int ymax = q.getInt("ymax", ChunkSnapshotService.WORLD_MIN_Y + ChunkSnapshotService.WORLD_HEIGHT);
-        var payload = snapshots.snapshot(() -> snapshots.payload(dim, cx, cz, ymin, ymax));
+        // withBiome=true：/api/chunk 供模式 A 本地网格按群系染色（MCC1 v2，R8）
+        var payload = snapshots.snapshot(() -> snapshots.payload(dim, cx, cz, ymin, ymax, true));
         if (payload == null) {
             throw new BusyException();
         }

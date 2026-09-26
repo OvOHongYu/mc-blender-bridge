@@ -3,9 +3,10 @@
 
 合成一个 16×16×16 单 Section 区块（覆盖 class1/2/3/4/5 全部剔除路径），
 输出:
-  tests/fixtures/mcc1_sample.bin   MCC1 原始字节（未压缩）
-  tests/fixtures/mcm1_sample.bin   MCM1 原始字节（未压缩, lod0/AO/fancy）
-  tests/fixtures/expected.json     调色板、quad 摘要（Java 逐字节比对用）
+  tests/fixtures/mcc1_sample.bin        MCC1 v1 原始字节（未压缩）
+  tests/fixtures/mcc1_biome_sample.bin  MCC1 v2 原始字节（含 section 群系）
+  tests/fixtures/mcm1_sample.bin        MCM1 原始字节（未压缩, lod0/AO/fancy）
+  tests/fixtures/expected.json          调色板、quad 摘要（Java 逐字节比对用）
 
 Java 侧 ConformanceTest 以相同方式重建合成区块，输出与夹具逐字节一致方可通过。
 """
@@ -74,6 +75,17 @@ def to_payload(world):
             "sections": [{"palette": pal, "indices": idx}]}
 
 
+def section_biomes():
+    """Section 的 4×4×4 群系（供 MCC1 v2 夹具）：x4>=2 为沙漠，其余平原。
+
+    名字表下标即该 Section 内的群系 id；Java ConformanceTest 需重建出完全相同的
+    名字表与 64 个下标。"""
+    names = ["minecraft:plains", "minecraft:desert"]
+    ids = np.zeros((4, 4, 4), np.uint8)      # (y4, z4, x4)
+    ids[:, :, 2:] = 1
+    return names, ids
+
+
 def main():
     os.makedirs(FIX_DIR, exist_ok=True)
     world = build_world()
@@ -82,6 +94,15 @@ def main():
     mcc1 = codec.encode_mcc1(payload)
     with open(os.path.join(FIX_DIR, "mcc1_sample.bin"), "wb") as f:
         f.write(mcc1)
+
+    # MCC1 v2（section 群系段）
+    bnames, bids = section_biomes()
+    payload_bio = dict(payload, sections=[dict(payload["sections"][0],
+                                               biomes=(bnames, bids))])
+    mcc1_bio = codec.encode_mcc1(payload_bio)
+    with open(os.path.join(FIX_DIR, "mcc1_biome_sample.bin"), "wb") as f:
+        f.write(mcc1_bio)
+    assert mcc1_bio[4] == 2, "v2 夹具版本号应为 2"
 
     # 3×3 邻域（邻居为空）-> 与 Java 实现相同的输入
     payloads = {(0, 0): codec.decode_mcc1(mcc1)}
@@ -122,6 +143,9 @@ def main():
     m2 = codec.decode_mcm1(mcm1)
     assert p2["sections"][0]["palette"] == payload["sections"][0]["palette"]
     assert len(m2["dirs"]) == len(quads)
+    p3 = codec.decode_mcc1(mcc1_bio)
+    bn2, bi2 = p3["sections"][0]["biomes"]
+    assert bn2 == bnames and np.array_equal(bi2, bids.reshape(-1))
     print(f"fixtures ok: mcc1={len(mcc1)}B mcm1={len(mcm1)}B quads={len(quads)} "
           f"palette={len(pal)}")
 

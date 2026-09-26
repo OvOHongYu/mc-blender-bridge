@@ -11,8 +11,14 @@ public final class Payloads {
     public record PalEntry(int cls, String name) {
     }
 
-    /** 单个 16³ Section；indices 长度 4096，idx=(y<<8)|(z<<4)|x，值为调色板下标。 */
-    public record SectionData(List<PalEntry> palette, short[] indices) {
+    /** 单个 16³ Section；indices 长度 4096，idx=(y<<8)|(z<<4)|x，值为调色板下标。
+     * biomeNames/biomeIds（R8）为该 Section 的 4×4×4 群系：名字表 + 64 个下标
+     * （idx=(y<<4)|(z<<2)|x），null 表示不带群系（MCC1 v1）。 */
+    public record SectionData(List<PalEntry> palette, short[] indices,
+                              List<String> biomeNames, byte[] biomeIds) {
+        public SectionData(List<PalEntry> palette, short[] indices) {
+            this(palette, indices, null, null);
+        }
     }
 
     /** 区块载荷；sections 长度 = secCount，null 表示空 Section。 */

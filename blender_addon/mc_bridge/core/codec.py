@@ -5,12 +5,17 @@
 压缩协商由 HTTP 层负责（X-MCB-Encoding: 2 = zlib），本模块只处理未压缩载荷。
 
 MCC1:
-  b"MCC1" | ver u8 | dim(u16len+utf8) | cx i32 | cz i32 | yBottom i16 |
+  b"MCC1" | ver u8 = 1|2 | dim(u16len+utf8) | cx i32 | cz i32 | yBottom i16 |
   secCount u8 | present u32(LSB-first) |
   每个存在 Section（自 yBottom 起，仅计存在的）:
     palSize u16 | 每项: class u8 + name(u16len+utf8) |
     bits u8 (0 表示单元素调色板) | bits>0 时: ceil(4096*bits/8) 字节位压缩
+    --- 以下仅 v2（群系，R8）---
+    bioPalSize u16 | 每项: name(u16len+utf8) |
+    bioIds 64×u8（bioPalSize>0 时存在；4×4×4 采样，索引序 idx=(y<<4)|(z<<2)|x）
   单元索引顺序 idx = (y<<8)|(z<<4)|x，逐元素、元素内 LSB-first。
+  v2 段使控制模式「本地网格」(模式 A) 也能按群系染色；无群系数据的 Section 写
+  bioPalSize=0，整体无群系时用 v1（旧客户端可照常解析 v1）。
 
 MCM1:
   b"MCM1" | ver u8 | dim | cx i32 | cz i32 | yBottom i16 |
@@ -69,10 +74,18 @@ def _unpack_indices(data: bytes, bits: int, n: int) -> np.ndarray:
 def encode_mcc1(payload: dict) -> bytes:
     """payload: {"dim", "cx", "cz", "yBottom", "sections"}；
     sections: list，长度 secCount；每项 None（跳过）或
-    {"palette": [(class, name), ...], "indices": uint16(4096,)}。"""
+    {"palette": [(class, name), ...], "indices": uint16(4096,),
+     "biomes": (names, ids uint8(64))   # 可选（R8 群系）；给出即写 MCC1 v2}。"""
     dim, cx, cz = payload["dim"], payload["cx"], payload["cz"]
     y_bottom, sections = payload["yBottom"], payload["sections"]
-    out = [MCC1_MAGIC, struct.pack("<B", 1), _pack_str(dim),
+    ver = 1
+    for s in sections:                        # 任一分段带群系即全文升到 v2
+        if s is not None:
+            b = s.get("biomes")
+            if b and b[1] is not None:
+                ver = 2
+                break
+    out = [MCC1_MAGIC, struct.pack("<B", ver), _pack_str(dim),
            struct.pack("<iih", cx, cz, y_bottom), struct.pack("<B", len(sections))]
     mask = 0
     for i, sec in enumerate(sections):
@@ -93,13 +106,22 @@ def encode_mcc1(payload: dict) -> bytes:
             bits = max(4, need)
         out.append(struct.pack("<B", bits))
         out.append(_pack_indices(idx, bits))
+        if ver == 2:
+            bn, bi = sec.get("biomes") or ([], None)
+            if bi is None:
+                out.append(struct.pack("<H", 0))
+            else:
+                out.append(struct.pack("<H", len(bn)))
+                for nm in bn:
+                    out.append(_pack_str(nm if nm else ""))
+                out.append(np.asarray(bi, np.uint8).reshape(-1).tobytes())
     return b"".join(out)
 
 
 def decode_mcc1(buf: bytes) -> dict:
     assert buf[:4] == MCC1_MAGIC, "bad MCC1 magic"
     (ver,) = struct.unpack_from("<B", buf, 4)
-    assert ver == 1
+    assert ver in (1, 2), f"bad MCC1 version {ver}"
     off = 5
     dim, off = _read_str(buf, off)
     cx, cz, y_bottom, sec_count = struct.unpack_from("<iihB", buf, off)
@@ -125,6 +147,19 @@ def decode_mcc1(buf: bytes) -> dict:
         off += nbits
         indices = _unpack_indices(data, bits, 4096)
         sections[i] = {"palette": pal, "indices": indices}
+        if ver == 2:                          # 群系段（与存档 payload 同构）
+            (bsz,) = struct.unpack_from("<H", buf, off)
+            off += 2
+            bnames = []
+            for _ in range(bsz):
+                nm, off = _read_str(buf, off)
+                bnames.append(nm)
+            if bsz:
+                bids = np.frombuffer(buf, np.uint8, 64, off).copy()
+                off += 64
+                sections[i]["biomes"] = (bnames, bids)
+            else:
+                sections[i]["biomes"] = ([], None)
     assert off == len(buf), f"MCC1 trailing bytes: {len(buf) - off}"
     return {"dim": dim, "cx": cx, "cz": cz, "yBottom": y_bottom, "sections": sections}
 

@@ -367,7 +367,13 @@ class TestBiomeTintToggle:
 
 
 class _BiomeFake:
-    """假包：草方块顶面染色；平原/沙漠给两种截然不同的颜色便于断言。"""
+    """假包：草方块顶面染色；平原/沙漠给两种截然不同的颜色便于断言。
+
+    只实现染色/判定所需的最小接口；`use_model=False` 表示不注入烘焙模型
+    （真实包对简单整立方体也是 False）。"""
+
+    def use_model(self, name):
+        return False
 
     def tint_mask(self, name):
         return 1 if "grass" in name else 0
@@ -446,6 +452,54 @@ class TestControlModeBiomeTint:
         m = self._msg()
         assert m["biomeIds"] is not None
         assert M.biome_from_quads(m["verts"], m["dirs"], None, None, _BiomeFake()) is None
+
+
+class TestModeABiomeTint:
+    """控制模式「本地网格」(模式 A)：MCC1 v2 携带 section 群系 -> 本地染色。
+
+    完整链路：模拟服务器 payload -> encode_mcc1(v2) -> decode_mcc1 ->
+    mesh_payload_biome（与 scheduler._fetch_geo_local 同构）-> geo_from_arrays。"""
+
+    @classmethod
+    def _payload(cls):
+        sim_dir = os.path.join(ROOT, "server_sim")
+        if sim_dir not in sys.path:
+            sys.path.insert(0, sim_dir)
+        import mc_server_sim as S                            # noqa: E402
+        from mc_bridge.core import codec                     # noqa: E402
+        w = S.World()
+        buf = codec.encode_mcc1(w.payload(0, 0, -64, 320))
+        assert buf[4] == 2, "控制模式 /api/chunk 带群系时应写 MCC1 v2"
+        return codec.decode_mcc1(buf)
+
+    def test_roundtrip_carries_section_biomes(self):
+        p = self._payload()
+        secs = [s for s in p["sections"] if s is not None]
+        assert secs, "模拟区块应至少有一个非空 section"
+        for s in secs:
+            names, ids = s["biomes"]
+            assert names and ids is not None and len(ids) == 64
+
+    def test_local_mesh_tints_by_biome(self):
+        p = self._payload()
+        pack = _BiomeFake()
+        quads, pal, _yb, _models, bio = M.mesh_payload_biome(
+            {(0, 0): p}, with_ao=True, pack=pack, biome=True)
+        assert bio is not None, "本地网格应消费 section 群系"
+        verts = np.array([q[0] for q in quads], np.float32)
+        dirs = np.array([q[1] for q in quads], np.uint8)
+        blks = np.array([q[2] for q in quads], np.uint16)
+        aos = np.array([q[3] for q in quads], np.uint8).reshape(-1, 4)
+        geo = M.geo_from_arrays(verts, dirs, blks, aos,
+                                [n for _c, n in pal], pack=pack, biome=bio)
+        vc = np.asarray(geo["vcol"]).reshape(-1, 4, 4)
+        names = [n for _c, n in pal]
+        tops = [i for i in range(len(quads))
+                if int(dirs[i]) == 2 and "grass" in names[int(blks[i])]]
+        assert tops, "模拟世界里应有草方块顶面"
+        reds = sum(1 for i in tops if tuple(vc[i, 0, :3]) == (255, 0, 0))
+        blues = sum(1 for i in tops if tuple(vc[i, 0, :3]) == (0, 0, 255))
+        assert reds and blues, "本地网格下两种群系的草顶应分别为平原红/沙漠蓝"
 
 
 class TestMeshBiomeKey:

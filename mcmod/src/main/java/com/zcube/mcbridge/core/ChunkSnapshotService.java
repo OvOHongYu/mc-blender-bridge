@@ -94,8 +94,14 @@ public final class ChunkSnapshotService {
         return null;
     }
 
-    /** 读取（必要时强制加载/生成）区块并转为 MCC1 的 section 列表。 */
+    /** 读取（必要时强制加载/生成）区块并转为 MCC1 的 section 列表（不带群系）。 */
     public List<SectionData> sections(ServerWorld w, int cx, int cz) {
+        return sections(w, cx, cz, false);
+    }
+
+    /** 读取区块 -> MCC1 的 section 列表。withBiome=true 时每个 Section 附带
+     * 4×4×4 群系（R8），供被动作 A（本地网格）按群系染色。 */
+    public List<SectionData> sections(ServerWorld w, int cx, int cz, boolean withBiome) {
         Chunk chunk = w.getChunk(cx, cz, ChunkStatus.FULL, true);
         String dim = w.getRegistryKey().getValue().toString();
         List<SectionData> out = new ArrayList<>(SEC_COUNT);
@@ -129,9 +135,51 @@ public final class ChunkSnapshotService {
                     }
                 }
             }
-            out.add(any ? new SectionData(pal, indices) : null);
+            if (!any) {
+                out.add(null);
+            } else {
+                SectionBiomes sb = withBiome ? sectionBiomes(w, cx, cz, si) : null;
+                out.add(sb == null ? new SectionData(pal, indices)
+                        : new SectionData(pal, indices, sb.names(), sb.ids()));
+            }
         }
         return out;
+    }
+
+    /** Section 的 4×4×4 群系：名字表（下标即该 Section 内的群系 id，空串 = 未知）
+     * 与 64 个下标（idx=(y<<4)|(z<<2)|x）。 */
+    private record SectionBiomes(List<String> names, byte[] ids) {
+    }
+
+    private static SectionBiomes sectionBiomes(ServerWorld w, int cx, int cz, int si) {
+        List<String> names = new ArrayList<>();
+        Map<String, Byte> idOf = new HashMap<>();
+        byte[] ids = new byte[64];
+        int baseX = cx * 16;
+        int baseZ = cz * 16;
+        int baseY = WORLD_MIN_Y + si * 16;
+        for (int y4 = 0; y4 < 4; y4++) {
+            for (int z4 = 0; z4 < 4; z4++) {
+                for (int x4 = 0; x4 < 4; x4++) {
+                    String nm = "";
+                    try {
+                        var hb = w.getBiome(new net.minecraft.util.math.BlockPos(
+                                baseX + x4 * 4, baseY + y4 * 4, baseZ + z4 * 4));
+                        nm = hb.getKey().map(k -> k.getValue().toString()).orElse("");
+                    } catch (Exception ignore) {
+                        // 越界/未生成 -> 未知群系（客户端退回常量色）
+                    }
+                    Byte id = idOf.get(nm);
+                    if (id == null) {
+                        id = (byte) names.size();
+                        idOf.put(nm, id);
+                        names.add(nm);
+                    }
+                    ids[(y4 << 4) | (z4 << 2) | x4] = id;
+                }
+            }
+        }
+        return new SectionBiomes(names, ids);
     }
 
     private static String stateName(BlockState st) {
@@ -163,6 +211,12 @@ public final class ChunkSnapshotService {
 
     /** MCC1 载荷（ymin/ymax 对齐 16 裁剪；空 section 置 null）。 */
     public ChunkPayload payload(String dim, int cx, int cz, int ymin, int ymax) {
+        return payload(dim, cx, cz, ymin, ymax, false);
+    }
+
+    /** payload 的 withBiome=true 版本：每个 Section 附带 4×4×4 群系（MCC1 v2）。 */
+    public ChunkPayload payload(String dim, int cx, int cz, int ymin, int ymax,
+                                boolean withBiome) {
         ServerWorld w = world(dim);
         if (w == null) {
             return null;
@@ -171,7 +225,7 @@ public final class ChunkSnapshotService {
         int yt = Math.min(WORLD_MIN_Y + WORLD_HEIGHT, ymax);
         int secLo = Math.max(0, (yb - WORLD_MIN_Y) / 16);
         int secHi = Math.min(SEC_COUNT, (yt - WORLD_MIN_Y + 15) / 16);
-        List<SectionData> secs = sections(w, cx, cz);
+        List<SectionData> secs = sections(w, cx, cz, withBiome);
         List<SectionData> sub = new ArrayList<>();
         for (int i = 0; i < SEC_COUNT; i++) {
             sub.add(i < secLo || i >= secHi ? null : secs.get(i));

@@ -55,6 +55,44 @@ class TestCodec(unittest.TestCase):
         np.testing.assert_array_equal(p2["sections"][0]["indices"], idx)
         self.assertEqual(p2["sections"][0]["palette"], pal)
 
+    def test_mcc1_biome_v2_roundtrip(self):
+        pal, idx = block_idx({(0, 0, 0): "minecraft:stone"}, "x")
+        names = ["minecraft:plains", "minecraft:desert"]
+        ids = np.zeros(64, np.uint8)
+        ids[32:48] = 1                              # (y4,z4,x4) 的 x4 半区为沙漠
+        sec = {"palette": pal, "indices": idx, "biomes": (names, ids)}
+        p = make_payload()
+        p["sections"] = [sec]
+        buf = codec.encode_mcc1(p)
+        self.assertEqual(buf[4], 2, "带群系应写 MCC1 v2")
+        p2 = codec.decode_mcc1(buf)
+        bn, bi = p2["sections"][0]["biomes"]
+        self.assertEqual(bn, names)
+        np.testing.assert_array_equal(bi, ids)
+
+    def test_mcc1_v1_without_biome(self):
+        p = make_payload()
+        self.assertEqual(codec.encode_mcc1(p)[4], 1, "无群系仍写 v1")
+        p2 = codec.decode_mcc1(codec.encode_mcc1(p))
+        self.assertNotIn("biomes", p2["sections"][0])
+
+    def test_mcc1_v2_section_without_biome(self):
+        """ver 由某个分段带群系决定；同报文内无群系的分段写 bioPalSize=0。"""
+        pal, idx = block_idx({(0, 0, 0): "minecraft:stone"}, "x")
+        ids = np.zeros(64, np.uint8)
+        sec_bio = {"palette": pal, "indices": idx,
+                   "biomes": (["minecraft:plains"], ids)}
+        sec_plain = {"palette": pal, "indices": idx}
+        p = make_payload(n_secs=2)
+        p["sections"] = [sec_bio, sec_plain]
+        buf = codec.encode_mcc1(p)
+        self.assertEqual(buf[4], 2)
+        p2 = codec.decode_mcc1(buf)
+        bn, bi = p2["sections"][0]["biomes"]
+        self.assertEqual(bn, ["minecraft:plains"])
+        np.testing.assert_array_equal(bi, ids)
+        self.assertEqual(p2["sections"][1]["biomes"], ([], None))
+
     def test_mcc1_single_palette_bits0(self):
         pal = [(1, "minecraft:stone")]
         idx = np.zeros(4096, np.uint16)
