@@ -398,23 +398,53 @@ def build_model_quads(model, texid_of, xr=0, yr=0, uvlock=False):
     return _dedupe_coincident(out)
 
 
-def _dedupe_coincident(quads):
-    """丢掉与原面共面同形、只差绕序的面片。
+# 共面叠加层的外移量（1/16 方块单位）：1/128 方块 = 1/8 像素，肉眼不可见
+_COPLANAR_EPS = 0.125
+# 方向索引 0..5 = +X,-X,+Y,-Y,+Z,-Z（与 mesher.DIR_VEC 一致）
+_DIR_VEC = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
-    MC 的零厚度模型（`block/cross.json` 等）会给同一片"纸"正反两面各写一个 face
-    （如 north + south），两者顶点集合相同、绕序相反。原版渲染剔除背面，所以两面
-    各画一次是对的；Blender 默认双面渲染（材质未开背面剔除），两者会**共面重叠**
-    产生 Z-Fighting，只需留一个。同顶点集且贴图/染色一致才合并，避免误删。"""
-    seen = set()
-    out = []
+
+def _dedupe_coincident(quads):
+    """处理「同方向 + 同顶点集合」的共面面片（Z-Fighting）。
+
+    分两种情况：
+
+    1. **同层重复**（贴图与染色都相同）：MC 的零厚度模型（`block/cross.json` 等）
+       给同一片"纸"的正反面各写一个 face（north + south），顶点集合相同、绕序相反。
+       原版渲染剔除背面所以两面各画一次是对的；Blender 默认双面渲染（材质未开背面
+       剔除），两者会共面重叠，只留一个。
+
+    2. **有意叠加层**（贴图或染色不同）：原版 `grass_block.json` 的 overlay 元素与
+       base 元素坐标**完全相同**（`from=[0,0,0] to=[16,16,16]`），MC 靠绘制顺序 +
+       深度函数 LEQUAL 决胜。Blender 对共面面片没有确定次序，会**逐像素闪烁/混色**
+       —— 表现为草方块侧面的草皮"没染色"、整块发灰。这里把后出现的层沿其法向外移
+       一个极小量（见 `_COPLANAR_EPS`），既消除 Z-Fighting 又保持"叠加层在前"。
+    """
+    groups = {}
+    order = []
     for q in quads:
-        verts, _d, texid, tint, _cull, _uvs = q
-        key = (frozenset(tuple(round(c, 6) for c in v) for v in verts),
-               texid, tint)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(q)
+        verts, d, texid, tint, _cull, _uvs = q
+        gkey = frozenset(tuple(round(c, 6) for c in v) for v in verts)
+        layer = (texid, tint)
+        g = groups.get(gkey)
+        if g is None:
+            groups[gkey] = {layer: (d, q)}
+            order.append(gkey)
+        elif layer in g:
+            continue                       # 同层重复（零厚度模型正反面）-> 丢弃
+        else:
+            g[layer] = (d, q)              # 有意叠加层 -> 保留，稍后可能外移
+    out = []
+    for gkey in order:
+        layers = list(groups[gkey].values())
+        one_dir = len({d for d, _q in layers}) == 1
+        if len(layers) > 1 and one_dir:
+            # 同方向共面叠加（如 grass_block 的 side 与 overlay）：后出现的外移
+            off = tuple(_COPLANAR_EPS * c for c in _DIR_VEC[layers[0][0]])
+            layers = [layers[0]] + [
+                (d, (tuple(tuple(c + o for c, o in zip(v, off)) for v in q[0]),)
+                    + tuple(q[1:])) for d, q in layers[1:]]
+        out.extend(q for _d, q in layers)
     return out
 
 
