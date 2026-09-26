@@ -98,12 +98,13 @@ def _build_mesh(name, geo):
         uv.data.foreach_set("uv", np.ascontiguousarray(geo["uv"], np.float32).ravel())
     col = mesh.color_attributes.new("Col", 'BYTE_COLOR', 'CORNER')
     if col is not None and nq:
-        # vcol 是按 sRGB 空间算出来的 uint8（tint × AO）；而 BYTE_COLOR 的
-        # `.color` 是**场景线性**空间，直接写 byte/255 会让着色器把 sRGB 值当线性
-        # 使用 —— 等于把染色与 AO 整体提亮（实测 sRGB 0.416 的沼泽草色被当成
-        # 线性 0.416，亮约 2.9 倍，观感"偏灰"）。这里先做 sRGB->线性再写入。
+        # vcol 是按 sRGB 空间算出来的 uint8：rgb = tint x AO、a = AO（叠加层合成要用）。
+        # 而 BYTE_COLOR 的 `.color` 是**场景线性**空间，所以 rgb 需先 sRGB->线性再写入
+        # （否则染色与 AO 被整体提亮）。**alpha 不做转换** —— AO 本身不是颜色，
+        # 做伽马变换会把它压暗（如 0.45 -> 0.17）。
         f = np.ascontiguousarray(geo["vcol"], np.float32) / 255.0
         lin = np.where(f <= 0.04045, f / 12.92, ((f + 0.055) / 1.055) ** 2.4)
+        lin[..., 3] = f[..., 3]
         col.data.foreach_set("color", lin.ravel())
     mesh.validate()
     mesh.update()
