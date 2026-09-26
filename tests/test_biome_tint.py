@@ -110,37 +110,70 @@ class TestTintKind:
 
 
 class TestQuadCells:
-    """完整方块面（顶点为 padded 平面索引）-> 所属格子。"""
+    """完整方块面 -> 所属格子（与 _emit 的坐标约定对应）。
 
-    V = np.array([[[5, 1, 3], [5, 1, 4], [5, 2, 4], [5, 2, 3]]], np.int16)
+    _emit 里 u/v 轴写的是 `u0 - 1`（格子索引 - 1），法向轴直接写平面索引 p，
+    因此：u/v 格子 = 顶点 + 1；法向 +dir 格子 = 顶点、-dir 格子 = 顶点 + 1。
 
-    def test_positive_face_uses_plane_index(self):
+    下面用「padded 格子 (5,3,4) 的 +X 面」构造：该面位于 x 高边（顶点 x=5），
+    y/z 方向覆盖格子 3..3、4..4（顶点 2..3、3..4）。"""
+
+    # +X 面：(5,2,3) (5,2,4) (5,3,4) (5,3,3)
+    V = np.array([[[5, 2, 3], [5, 2, 4], [5, 3, 4], [5, 3, 3]]], np.int16)
+
+    def test_positive_face_is_own_cell(self):
         c = M._quad_cells(self.V, np.array([0], np.uint8))       # +X
-        assert tuple(int(v) for v in c[0]) == (5, 1, 3)
+        assert tuple(int(v) for v in c[0]) == (5, 3, 4)
 
-    def test_negative_face_shifts_by_one(self):
+    def test_negative_face_belongs_to_next_cell(self):
+        # 同样这组顶点若是 -X 面，则它属于东侧邻格 (6,3,4)
         c = M._quad_cells(self.V, np.array([1], np.uint8))       # -X
-        assert tuple(int(v) for v in c[0]) == (6, 1, 3)
+        assert tuple(int(v) for v in c[0]) == (6, 3, 4)
+
+    def test_uv_axes_shift_by_one(self):
+        # 回归：u/v 轴漏 +1 会让群系查找整体斜移 (-1,-1)
+        c = M._quad_cells(self.V, np.array([0], np.uint8))[0]
+        assert int(c[1]) == 3 and int(c[2]) == 4, "u/v 轴必须 +1"
 
 
 class TestModelCells:
-    """烘焙模型面（局部像素坐标）-> padded 格子；贴边界薄面不能外溢。"""
+    """烘焙模型面（模型自身局部像素 0..16）-> padded 格子。
 
-    def test_face_flush_with_upper_boundary(self):
-        # 草方块 +X 侧面：4 个顶点 x 全是 16（局部像素）-> 属于中心区块第 0 格
+    面心落在格边界时归属由**面法向**决定：+dir 面在格上边界、-dir 面在下边界，
+    两者都属于本方块。只按 floor/ceil 会把其中一半判到隔壁格。"""
+
+    def test_positive_face_at_own_upper_boundary(self):
+        # 本方块（chunk 首格）的 +X 面：面心 px=16 -> padded 1
         v = np.array([[[16, 0, 0], [16, 0, 16], [16, 16, 16], [16, 16, 0]]], np.float32)
-        c = M._model_cells(v)
-        assert int(c[0][0]) == 1          # 用 floor 会算成 2（错一格）
+        assert int(M._model_cells(v, np.array([0]))[0][0]) == 1
 
-    def test_face_flush_with_lower_boundary(self):
+    def test_negative_face_at_own_lower_boundary(self):
+        # 同一方块的 -X 面：面心 px=0 -> 仍属本格
         v = np.array([[[0, 0, 0], [0, 0, 16], [0, 16, 16], [0, 16, 0]]], np.float32)
-        c = M._model_cells(v)
-        assert int(c[0][0]) == 1
+        assert int(M._model_cells(v, np.array([1]))[0][0]) == 1
+
+    def test_negative_face_at_non_origin_cell(self):
+        # 关键回归：方块在局部第 5 格的 -X 面（面心 px=80）
+        # 旧实现 ceil(80/16)=5 -> padded 5（取到 -X 邻格群系色）；正确应为 padded 6
+        v = np.array([[[80, 0, 80], [80, 0, 96], [80, 16, 96], [80, 16, 80]]], np.float32)
+        c = M._model_cells(v, np.array([1]))       # -X
+        assert tuple(int(x) for x in c[0]) == (6, 1, 6)
+
+    def test_positive_face_at_non_origin_cell(self):
+        # 同一方块的 +X 面在 px=96 -> 也是 padded 6
+        v = np.array([[[96, 0, 80], [96, 0, 96], [96, 16, 96], [96, 16, 80]]], np.float32)
+        c = M._model_cells(v, np.array([0]))       # +X
+        assert tuple(int(x) for x in c[0]) == (6, 1, 6)
+
+    def test_negative_z_face_at_non_origin_cell(self):
+        v = np.array([[[80, 0, 80], [96, 0, 80], [96, 16, 80], [80, 16, 80]]], np.float32)
+        c = M._model_cells(v, np.array([5]))       # -Z
+        assert tuple(int(x) for x in c[0]) == (6, 1, 6)
 
     def test_inner_face(self):
         # 薄板顶面 y=8 像素 -> 格 0 -> padded 1
         v = np.array([[[0, 8, 0], [16, 8, 0], [16, 8, 16], [0, 8, 16]]], np.float32)
-        c = M._model_cells(v)
+        c = M._model_cells(v, np.array([2]))       # +Y
         assert tuple(int(x) for x in c[0]) == (1, 1, 1)
 
 

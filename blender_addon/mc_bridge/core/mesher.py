@@ -486,12 +486,20 @@ def _emit_flat(quads, blk, p, u0, v0, w, h, d, positive):
 def _quad_cells(verts, dirs):
     """每面所属格子的 padded 坐标 (nq,3) int32。
 
-    法向轴：正向面取平面索引，负向面取平面索引 + 1；u/v 轴取矩形起点
-    （群系已进合并键，矩形内群系必然一致，取任一点等价）。"""
+    与 `_emit` 的坐标约定严格对应（`_emit` 里 `lu, lv = u0 - 1, v0 - 1`，
+    法向轴直接写入平面索引 p）：
+
+      u/v 轴：顶点坐标 = 格子索引 - 1  -> **格子 = 顶点 + 1**
+      法向轴：+dir 面在格子的高边 -> 格子 = 顶点（= 平面索引 p）
+              -dir 面在格子的低边 -> 格子 = 顶点 + 1
+
+    漏掉 u/v 的 +1 会让群系查找整体斜移 (-1,-1)：边界处颜色错一格。
+    u/v 取矩形起点即可（群系已进合并键，矩形内必然一致）。"""
     nq = verts.shape[0]
     iv = np.asarray(verts, np.int32)
-    d = np.asarray(dirs, np.int32) // 2
-    neg = (np.asarray(dirs, np.int32) % 2).astype(np.int32)
+    du = np.asarray(dirs, np.int32)
+    d = du // 2
+    neg = (du % 2).astype(np.int32)
     cell = np.empty((nq, 3), np.int32)
     for ax in range(3):
         m = (d == ax)
@@ -499,18 +507,37 @@ def _quad_cells(verts, dirs):
             cell[m, ax] = iv[m, 0, ax] + neg[m]
         mu = ~m
         if mu.any():
-            cell[mu, ax] = iv[mu][:, :, ax].min(axis=1)
+            cell[mu, ax] = iv[mu][:, :, ax].min(axis=1) + 1
     return cell
 
 
-def _model_cells(verts16):
-    """烘焙模型面（中心区块局部坐标、1/16 方块单位）-> padded 格子坐标 (nq,3)。
+def _model_cells(verts16, dirs):
+    """烘焙模型面（模型自身局部像素、0..16）-> padded 格子坐标 (nq,3)。
 
-    取面的中心落在哪个局部格。**必须用 ceil 而不是 floor**：草方块 ±x/±z 侧面
-    的 4 个顶点全落在格边界上（如 x=16），floor 会把它算到隔壁格 —— 同群系内
-    看不出差异，跨群系边界时会整体错开 1 格。"""
+    模型顶点是**以自身方块原点**表达的（0..16 像素 = 该方块），因此逐轴取
+    `floor(px/16)` 即可；但面心恰好落在格边界时（整立方体模型的 6 个面都是），
+    归属取决于**面法向**，必须借 dirs 判定：
+
+      +X 面心在 px=16（上边界）-> 属本方块   -> 需要 -eps 拉回
+      -X 面心在 px= 0（下边界）-> 也属本方块 -> 不能拉回
+
+    只按 floor/ceil 都会把一半的面判到隔壁格（草方块 -X/-Z 侧面因此会取到
+    相邻 1 格的群系色）。u/v 轴取面心 + 拉回（零厚度贴片贴在格边界时同样成立）。
+    """
     c = np.asarray(verts16, np.float32).mean(axis=1) / 16.0
-    return np.clip(np.ceil(c).astype(np.int32), 1, 16)
+    EPS = 1e-4
+    d = np.asarray(dirs, np.int32) // 2
+    pos = (np.asarray(dirs, np.int32) % 2) == 0
+    cell = np.empty(c.shape, np.int32)
+    for ax in range(3):
+        col = np.floor(c[:, ax] - EPS)
+        m = d == ax
+        if m.any():
+            # 法向轴：+dir 面拉回（面在格的上边界），-dir 面不拉（面在下边界）
+            col[m] = np.where(pos[m], np.floor(c[m, ax] - EPS),
+                              np.floor(c[m, ax]))
+        cell[:, ax] = col
+    return np.clip(cell, 0, 15) + 1
 
 
 def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
@@ -592,7 +619,8 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
         if biome is not None and mkind.any():
             pids, bio_lut = biome
             mverts = np.array([m[0] for m in models], np.float32).reshape(-1, 4, 3)
-            mcell = _model_cells(mverts)
+            mcell = _model_cells(mverts,
+                                 np.array([m[1] for m in models], np.int32))
             msel = mkind > 0
             mcol[msel] = bio_lut[pids[mcell[msel, 0], mcell[msel, 1],
                                       mcell[msel, 2]], mkind[msel]]
