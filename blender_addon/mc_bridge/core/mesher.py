@@ -21,6 +21,10 @@ import numpy as np
 from . import blocks as B
 
 AO_CURVE = (0.45, 0.65, 0.85, 1.0)
+# 叠加层（如草方块侧面的 side_overlay）与基底共面时沿法向推出的距离，单位 1/16 方块。
+# 原版靠分层绘制顺序决胜，Blender 无此次序 -> Z-Fighting。0.32/16 = 2% 方块，
+# 写入 v2 精度后为 5/256 方块，肉眼不可见。
+_OVERLAY_PUSH = 0.32
 DIRS = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
 DIR_VEC = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
 
@@ -239,18 +243,33 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
             cls = np.where((cls == B.CUTOUT) & ~cross_cell, B.OPAQUE,
                            cls).astype(np.uint8)
     quads = []
-    modeled = {}
+    modeled = {}        # gi -> 面片列表：整模型注入（这些方块的贪心面被丢弃）
+    overlays = {}       # gi -> 面片列表：只注入叠加层（贪心基底面保留）
     if pack is not None and palette is not None:
         for gi, ent in enumerate(palette):
             ecls = int(ent[0])
-            if ecls == B.AIR or ecls == B.OPAQUE:
-                continue        # 整立方体（含草方块等带叠加层）走贪心路径
+            if ecls == B.AIR:
+                continue
             name = ent[1]
+            # 是否注入烘焙模型只看资产包的 use_model（= "模型不是简单整立方体"），
+            # **不能**再按运行时 class 过滤：草方块在共享表里是 OPAQUE，但它的模型
+            # 是"基底 + 带 tintindex 的 side_overlay"，走整立方体路径会丢掉侧面的
+            # 叠加层，于是侧面草皮显示成基底贴图里烘焙的平原绿、与顶面不一致。
             if not pack.use_model(name):     # 传方块状态全名：v3 包按状态解析
                 continue
             vis = pack.variant_indices(B.base_name(name), B.props_of(name))
-            if vis:
-                modeled[gi] = vis
+            if not vis:
+                continue
+            extras = None
+            splitter = getattr(pack, "cube_overlay_extras", None)
+            if splitter is not None:
+                extras = splitter(vis)
+            if extras is not None:
+                # 整立方体 + 叠加层：基底留给贪心合并（草顶最高频，合并省几何），
+                # 只单独注入叠加层（仅出现在暴露侧面，量极小）
+                overlays[gi] = extras
+            else:
+                modeled[gi] = [q for vi in vis for q in pack.variants[vi]]
     for d in range(3):
         C = np.moveaxis(cls, d, 0)
         G = np.moveaxis(gid, d, 0)
@@ -358,13 +377,22 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
     if quads:
         va = np.array([q[0] for q in quads], np.int16).reshape(-1, 4, 3)
         quads = [(va[i], q[1], q[2], q[3]) for i, q in enumerate(quads)]
-    models = _emit_models(cls, gid, modeled, pack) if modeled else []
+    models = _emit_models(cls, gid, modeled) if modeled else []
+    if overlays:
+        # 叠加层与贪心基底**共面**（原版模型里两者坐标完全相同）。原版靠分层绘制
+        # 顺序 + LEQUAL 决胜，Blender 没有这个次序 -> Z-Fighting，草皮那层可能被
+        # 基底盖住而显示成基底贴图里烘焙的平原绿、与顶面不一致。这里沿面法向微推
+        # 5/256 方块（= 2% 方块，肉眼不可见，足以脱离深度精度）。
+        models.extend(_emit_models(cls, gid, overlays, push=_OVERLAY_PUSH))
     return quads, models
 
 
-def _emit_models(cls, gid, modeled, pack):
-    """对 modeled 调色板索引的格子发射烘焙模型几何（1/16 方块单位）。"""
-    ids = np.array(sorted(modeled), np.uint16)
+def _emit_models(cls, gid, entries, push=0.0):
+    """对 entries（gi -> 面片列表）里的格子发射烘焙模型几何（1/16 方块单位）。
+
+    push > 0 时沿面法向（DIR_VEC[d]，已随 blockstate 旋转变换过）推出该距离，
+    用于消解与贪心基底共面的叠加层 Z-Fighting。"""
+    ids = np.array(sorted(entries), np.uint16)
     mask = np.isin(gid, ids)
     mask[0, :, :] = mask[-1, :, :] = False
     mask[:, 0, :] = mask[:, -1, :] = False
@@ -373,14 +401,19 @@ def _emit_models(cls, gid, modeled, pack):
     for x, y, z in zip(*np.nonzero(mask)):
         gi = int(gid[x, y, z])
         ox, oy, oz = (int(x) - 1) * 16, (int(y) - 1) * 16, (int(z) - 1) * 16
-        for vi in modeled[gi]:
-            for verts, d, tex, tint, cull, uv in pack.variants[vi]:
-                if cull:
-                    dv = DIR_VEC[cull - 1]
-                    if cls[x + dv[0], y + dv[1], z + dv[2]] == B.OPAQUE:
-                        continue
-                wv = tuple((ox + v[0], oy + v[1], oz + v[2]) for v in verts)
-                out.append((wv, d, tex, tint, cull, uv, gi, (3, 3, 3, 3)))
+        for verts, d, tex, tint, cull, uv in entries[gi]:
+            if cull:
+                dv = DIR_VEC[cull - 1]
+                if cls[x + dv[0], y + dv[1], z + dv[2]] == B.OPAQUE:
+                    continue
+            if push:
+                nx, ny, nz = DIR_VEC[d]
+                dx, dy, dz = nx * push, ny * push, nz * push
+            else:
+                dx = dy = dz = 0.0
+            wv = tuple((ox + v[0] + dx, oy + v[1] + dy, oz + v[2] + dz)
+                       for v in verts)
+            out.append((wv, d, tex, tint, cull, uv, gi, (3, 3, 3, 3)))
     return out
 
 

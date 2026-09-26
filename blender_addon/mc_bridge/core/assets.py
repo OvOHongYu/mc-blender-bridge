@@ -215,6 +215,40 @@ class AssetPack:
         return tuple(tuple(((x >> sh) & 0xFF) / 255.0 for sh in (16, 8, 0))
                      for x in v)
 
+    def cube_overlay_extras(self, vis):
+        """变体索引列表 -> 叠加层面片列表；不是"整立方体 + 叠加层"则返回 None。
+
+        草方块这类方块的模型是「整立方体基底 + 与基底**完全共面**的叠加层元素」
+        （`grass_block_side_overlay`，带 tintindex）。这类方块应当：
+          - 基底面继续走贪心合并（草顶是最高频的面，合并能省大量几何）；
+          - 只把叠加层单独注入（它只出现在暴露的侧面上，量很小）。
+        否则要么丢叠加层（侧面草皮变成基底贴图里烘焙的平原绿），要么放弃合并
+        （实测草密集区块几何 561 -> 1264）。
+
+        判定：把面按顶点集分组，只有"存在共面重复"且"去重后的面方向恰好覆盖
+        6 个方向（整立方体）"时才认定为叠加层结构；其余情况一律返回 None，
+        由调用方整模型注入（避免误判）。"""
+        quads = [q for vi in vis for q in self.variants[vi]]
+        by_vs = {}
+        order = []
+        for q in quads:
+            key = frozenset(tuple(round(c, 6) for c in v) for v in q[0])
+            if key not in by_vs:
+                by_vs[key] = []
+                order.append(key)
+            by_vs[key].append(q)
+        extras = []
+        base_dirs = []
+        for key in order:
+            gs = by_vs[key]
+            base_dirs.append(int(gs[0][1]))
+            extras.extend(gs[1:])
+        if not extras:
+            return None
+        if sorted(base_dirs) != [0, 1, 2, 3, 4, 5]:
+            return None            # 去重后不是整立方体 -> 不按叠加层处理
+        return extras
+
     def default_faces(self, block):
         """(top, side, bottom) 贴图 id 或 None。传入方块状态名时按其状态解析。"""
         info = self._state_info(block)

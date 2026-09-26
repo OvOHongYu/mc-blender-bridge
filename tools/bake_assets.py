@@ -76,9 +76,6 @@ VERSION = 6                    # v1: 顶点 1/16；v2: 1/256（亚像素）；v3
                                # v4: 画变体表；v5: 实体模型段（分层，运行时装配）；
                                # v6: 群系染色表（biome -> grass/foliage/water RGB）
 _VERT_SCALE = 16               # v2 写入倍数：1/16 单位 × 16 = 1/256 方块单位
-# 同位置不同贴图的面（草方块侧面 overlay）沿法向推出的量，单位 1/16 方块。
-# 0.32/16 = 2% 方块（写入后为 5/256），肉眼不可见但足以脱离深度缓冲精度。
-_OVERLAY_PUSH = 0.32
 _I16_MIN, _I16_MAX = -32768, 32767
 
 # 烘焙期统计（诊断「导出失效」：贴图缺失会让面被丢弃；近似几何方块另出清单）
@@ -401,58 +398,28 @@ def build_model_quads(model, texid_of, xr=0, yr=0, uvlock=False):
     return _dedupe_coincident(out)
 
 
-def _face_axis_normal(verts):
-    """面片顶点 -> 主轴向单位法向 (int 三元组)。用于沿法向做微小推出。"""
-    a = [verts[1][i] - verts[0][i] for i in range(3)]
-    b = [verts[2][i] - verts[0][i] for i in range(3)]
-    n = (a[1] * b[2] - a[2] * b[1],
-         a[2] * b[0] - a[0] * b[2],
-         a[0] * b[1] - a[1] * b[0])
-    k = max(range(3), key=lambda i: abs(n[i]))
-    s = 1.0 if n[k] >= 0 else -1.0
-    out = [0.0, 0.0, 0.0]
-    out[k] = s
-    return out
+def _dedupe_coincident(quads):
+    """丢掉与原面共面同形、只差绕序的面片。
 
+    MC 的零厚度模型（`block/cross.json` 等）会给同一片"纸"正反两面各写一个 face
+    （如 north + south），两者顶点集合相同、绕序相反。原版渲染剔除背面所以两面
+    各画一次是对的；Blender 默认双面渲染（材质未开背面剔除），两者会**共面重叠**
+    产生 Z-Fighting，只需留一个。同顶点集且贴图/染色一致才合并，避免误删。
 
-def _dedupe_coincident(quads, push=_OVERLAY_PUSH):
-    """处理同顶点集的面片：
-
-    1. **完全重复**（贴图与染色都相同，只差绕序）：丢掉多余的那份。
-       MC 的零厚度模型（`block/cross.json` 等）会给同一片"纸"正反两面各写一个
-       face，原版剔除背面所以各画一次是对的；Blender 默认双面渲染，两者共面重叠
-       会 Z-Fighting，只需留一个。
-    2. **同位置但贴图/染色不同**（如草方块侧面的 `grass_block_side` 基底 +
-       `grass_block_side_overlay` 染色层）：两份都保留，但把后续的沿法向推出
-       `push`（1/16 方块单位），否则共面 -> Z-Fighting，草皮那层可能被基底盖住，
-       侧面草皮就会显示成基底里烘焙的平原绿，与顶部的群系色不一致。
-
-    推出的量很小（默认 0.32/16 = 2% 方块），肉眼不可见，但足以脱离深度精度"""
-    groups = {}
-    order = []
-    for q in quads:
-        key = frozenset(tuple(round(c, 6) for c in v) for v in q[0])
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append(q)
+    注意：**同位置但贴图/染色不同**的面（草方块侧面的基底 + side_overlay）两份都
+    保留，且这里**不改动顶点**——叠加层与基底是否共面，是运行时（Blender 缺
+    MC 那样的分层绘制顺序）才需要沿法向微推的事，见 mesher._OVERLAY_PUSH。
+    资产包保持原版模型几何的精确值。"""
+    seen = set()
     out = []
-    for key in order:
-        gs = groups[key]
-        seen = set()
-        kept = 0
-        for q in gs:
-            verts, d, texid, tint, cull, uvs = q
-            sig = (texid, tint)
-            if sig in seen:
-                continue
-            seen.add(sig)
-            if kept:
-                n = _face_axis_normal(verts)
-                verts = tuple(tuple(v[i] + n[i] * push for i in range(3))
-                              for v in verts)
-            out.append((verts, d, texid, tint, cull, uvs))
-            kept += 1
+    for q in quads:
+        verts, _d, texid, tint, _cull, _uvs = q
+        key = (frozenset(tuple(round(c, 6) for c in v) for v in verts),
+               texid, tint)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
     return out
 
 

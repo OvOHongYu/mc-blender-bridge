@@ -216,32 +216,98 @@ class TestVertexColorColorSpace:
         assert abs(got[3] - 1.0) < 1e-6
 
 
-class TestOverlayPush:
-    """F10：同位置不同贴图的面（草方块侧面 overlay）要沿法向推出，避免 Z-Fighting。"""
+class _OverlayPack:
+    """假资产包：grass 的模型 = 整立方体基底 + 4 个共面侧向叠加层（带 tintindex）。
 
-    _V = ((0, 0, 0), (0, 0, 16), (0, 16, 16), (0, 16, 0))     # -X 面
+    注意 dir 与平面的对应（与真实包一致）：x=0 平面是 -X 面(dir=1)、x=16 是 +X(0)、
+    y=0 是 -Y(3)、y=16 是 +Y(2)、z=0 是 -Z(5)、z=16 是 +Z(4)。"""
+
+    _FACES = [                                       # (dir, 顶点)
+        (1, ((0, 0, 0), (0, 0, 16), (0, 16, 16), (0, 16, 0))),        # -X
+        (0, ((16, 0, 0), (16, 0, 16), (16, 16, 16), (16, 16, 0))),    # +X
+        (3, ((0, 0, 0), (16, 0, 0), (16, 0, 16), (0, 0, 16))),        # -Y
+        (2, ((0, 16, 0), (16, 16, 0), (16, 16, 16), (0, 16, 16))),    # +Y
+        (5, ((0, 0, 0), (16, 0, 0), (16, 16, 0), (0, 16, 0))),        # -Z
+        (4, ((0, 0, 16), (16, 0, 16), (16, 16, 16), (0, 16, 16))),    # +Z
+    ]
     _UV = ((0, 0), (1, 0), (1, 1), (0, 1))
+    _SIDE_DIRS = (0, 1, 4, 5)                        # 叠加层只在 4 个侧面
 
-    def _q(self, tex, tint):
-        return (self._V, 1, tex, tint, 2, self._UV)
+    def __init__(self):
+        base = [(v, d, 10, -1, d + 1, self._UV) for d, v in self._FACES]
+        ovl = [(v, d, 11, 0, d + 1, self._UV)
+               for d, v in self._FACES if d in self._SIDE_DIRS]
+        self.variants = [base + ovl]
+        self.variant_info = [None]
 
-    def test_coincident_different_tex_pushed_along_normal(self):
-        out = bake_assets._dedupe_coincident([self._q(10, -1), self._q(11, 0)])
-        assert len(out) == 2, "贴图不同 -> 两份都保留"
-        assert out[0][0][0][0] == 0.0, "第一个（基底）不动"
-        assert abs(out[1][0][0][0] + bake_assets._OVERLAY_PUSH) < 1e-6, \
-            "第二个（overlay）应沿 -X 法向推出"
+    # AssetPack 接口（只实现被用到的部分）
+    def use_model(self, name):
+        return True
 
-    def test_identical_faces_still_deduped(self):
-        out = bake_assets._dedupe_coincident([self._q(10, -1), self._q(10, -1)])
-        assert len(out) == 1, "完全重复（零厚度模型正反面）仍应合并"
+    def variant_indices(self, base, props=None):
+        return [0]
+
+    def tint_mask(self, name):
+        return 0
+
+    def biome_tint(self, name):
+        return None
+
+    def cube_overlay_extras(self, vis):
+        return [q for vi in vis for q in self.variants[vi]][6:]
+
+
+class TestOverlayHandling:
+    """草地叠加层：基底走贪心合并，叠加层单独注入且沿法向推出。
+
+    否则要么丢叠加层（侧面草皮显示成基底贴图里烘焙的平原绿），要么放弃合并
+    （实测草密集区块几何 561 -> 1264）。"""
+
+    def _vol(self):
+        cls = np.zeros((18, 6, 18), np.uint8)
+        gid = np.zeros((18, 6, 18), np.uint16)
+        cls[1:17, 2, 1:17] = 1
+        return cls, gid
+
+    def test_cube_overlay_extras_detects_layer(self):
+        import bake_assets                                    # noqa: E402
+        from mc_bridge.core import assets as AS               # noqa: E402
+        assert hasattr(AS.AssetPack, "cube_overlay_extras")
+        # 用假包的同构数据结构直接验证判定逻辑（真包在 test_assets 里走烘焙）
+        p = _OverlayPack()
+        extras = AS.AssetPack.cube_overlay_extras(p, [0])
+        assert len(extras) == 4, "应识别出 4 个侧向叠加层面"
+        assert all(q[3] == 0 for q in extras), "叠加层带 tintindex"
+
+    def test_base_kept_on_greedy_path(self):
+        cls, gid = self._vol()
+        pack = _OverlayPack()
+        quads, models = M.mesh_padded(cls, gid, with_ao=False,
+                                     palette=[(1, "minecraft:grass_block")],
+                                     pack=pack)
+        assert quads, "基底必须仍由贪心路径产出（否则草顶失去合并）"
+        top = [q for q in quads if q[1] == 2]
+        assert top, "顶面应存在"
+        # 16x16 的平台顶面应合并成 1 个四边形（不是每格一个）
+        assert len(top) == 1, len(top)
+
+    def test_overlay_injected_and_pushed(self):
+        cls, gid = self._vol()
+        pack = _OverlayPack()
+        _q, models = M.mesh_padded(cls, gid, with_ao=False,
+                                   palette=[(1, "minecraft:grass_block")],
+                                   pack=pack)
+        ovl = [m for m in models if m[2] == 11]
+        assert ovl, "叠加层必须被注入"
+        # 环边格（平台四周）的叠加层沿法向推出：-X 面 x 应为 -0.32
+        negx = [m for m in ovl if m[1] == 1]
+        assert negx
+        xs = [v[0] for v in negx[0][0]]
+        assert abs(min(xs) + M._OVERLAY_PUSH) < 1e-6, min(xs)
 
     def test_push_is_subpixel(self):
-        # 单位是 1/16 方块（= 模型像素）：推出量须远小于 1 格（此处 ~1/50 格）
-        blk = bake_assets._OVERLAY_PUSH / 16.0
+        blk = M._OVERLAY_PUSH / 16.0
         assert 0 < blk < 0.05, blk
-        # 且要能被 1/256 方块精度表达（非零整数单位）
-        assert round(bake_assets._OVERLAY_PUSH * 16) >= 1
 
 
 class TestMeshBiomeKey:
