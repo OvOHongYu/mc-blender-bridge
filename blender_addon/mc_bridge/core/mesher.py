@@ -788,6 +788,16 @@ def _fluid_quads(cls, gid, palette):
     [1, H+1) × [1, E)，E = shape[0] - 1。"""
     H = cls.shape[1] - 2
     E = cls.shape[0] - 1
+    # 顶部空层裁剪：与 mesh_padded 一致。若不裁，下面的向量运算会在**整段
+    # 高度**（默认 384 层）上跑，而方块实体往往只占十几层 —— 实测一个只有 3 个
+    # 液体格的体积也要 138ms，几乎全是白算。只裁顶部，索引语义不变。
+    occ_y = (cls != 0).any(axis=(0, 2))
+    nnz_y = np.nonzero(occ_y)[0]
+    if nnz_y.size and int(nnz_y[-1]) + 2 < cls.shape[1]:
+        cut = max(2, int(nnz_y[-1]) + 2)
+        cls = np.ascontiguousarray(cls[:, :cut, :])
+        gid = np.ascontiguousarray(gid[:, :cut, :])
+        H = cls.shape[1] - 2
     n = len(palette)
     is_liq = np.zeros(n, bool)
     is_solid = np.zeros(n, bool)

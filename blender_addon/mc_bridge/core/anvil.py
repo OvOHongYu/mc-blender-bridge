@@ -237,7 +237,11 @@ def _decode_biomes(bs):
 
 
 def _classify(name):
-    """方块状态名 -> class 字节（共享表优先，其次资产包按状态分类，兜底不透明）。"""
+    """方块状态名 -> class 字节（共享表优先，其次资产包按状态分类）。
+
+    兜底取 NONCUBE 而不是 OPAQUE：未知方块无法确定形状，当成"不遮挡"才不会把
+    邻居朝它的面错误剔除（与模组侧 BlockClassifier 的兜底一致）；当成不透明则
+    会在地图上留下空洞。"""
     base = name.split("[", 1)[0]
     gid = B.INDEX.get(base)
     if gid is not None:
@@ -248,7 +252,7 @@ def _classify(name):
         c = pack.classify(name)      # 传全名：资产包按该状态解析（v3 包）
         if c is not None:
             return c
-    return 1
+    return B.NONCUBE
 
 
 # ---------------------------------------------------------------- Region ----

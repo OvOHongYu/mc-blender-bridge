@@ -4,14 +4,17 @@ import net.minecraft.block.BlockState;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.Identifier;
 
-import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * BlockState → 六类分类。
- * 优先查手工覆盖表（精确、跨版本稳定），未命中时用反射探测官方遮挡判定
- * （canOcclude / isOpaque 等，映射名随版本漂移），再回退到保守规则。
+ * 优先查手工覆盖表（精确、跨版本稳定），未命中时直接调用原版遮挡判定，
+ * 再按名字细分，最后对"非不透明且无法识别"的方块保守取 NONCUBE。
+ *
+ * 注意：**不能**用反射按 Yarn 方法名探测 —— 发布包经 loom 重映射后方法名是
+ * intermediary（method_*），字符串字面量不参与重映射，反射永远匹配不到，
+ * 会整片掉到兜底分支。直接调用则由编译器写出正确的重映射引用。
  */
 public final class BlockClassifier {
     /** 覆盖表：方块 id（不含命名空间时默认 minecraft:）。 */
@@ -31,26 +34,14 @@ public final class BlockClassifier {
             Map.entry("mangrove_leaves", BlockClass.CUTOUT),
             Map.entry("cherry_leaves", BlockClass.CUTOUT),
             Map.entry("azalea_leaves", BlockClass.CUTOUT),
-            Map.entry("oak_stairs", BlockClass.NONCUBE),
-            Map.entry("oak_slab", BlockClass.NONCUBE),
-            Map.entry("oak_fence", BlockClass.NONCUBE),
-            Map.entry("oak_door", BlockClass.NONCUBE),
-            Map.entry("oak_trapdoor", BlockClass.NONCUBE),
-            Map.entry("cobblestone_stairs", BlockClass.NONCUBE),
-            Map.entry("stone_brick_stairs", BlockClass.NONCUBE),
             Map.entry("grass_block", BlockClass.OPAQUE),
             Map.entry("short_grass", BlockClass.CUTOUT),
             Map.entry("poppy", BlockClass.CUTOUT),
             Map.entry("dandelion", BlockClass.CUTOUT),
-            Map.entry("torch", BlockClass.NONCUBE),
-            Map.entry("wall_torch", BlockClass.NONCUBE),
             Map.entry("ladder", BlockClass.NONCUBE),
             Map.entry("rail", BlockClass.NONCUBE));
 
     private static final Map<String, Integer> CACHE = new ConcurrentHashMap<>();
-    private static Method mCanOcclude;
-    private static Method mOpaque;
-    private static boolean reflected;
 
     private BlockClassifier() {
     }
@@ -61,62 +52,37 @@ public final class BlockClassifier {
         }
         Identifier id = Registries.BLOCK.getId(state.getBlock());
         String path = id.getPath();
-        String full = id.toString();
         Integer hit = OVERRIDES.get(path);
         if (hit == null) {
-            hit = OVERRIDES.get(full);
+            hit = OVERRIDES.get(id.toString());
         }
         if (hit != null) {
             return hit;
         }
-        return CACHE.computeIfAbsent(full, k -> fallback(state, path));
+        return CACHE.computeIfAbsent(id.toString(), k -> fallback(state, path));
     }
 
     private static int fallback(BlockState state, String path) {
-        // 反射探测（一次性解析方法名）
-        if (!reflected) {
-            reflected = true;
-            for (String name : new String[]{"canOcclude", "isOpaqueFullCube", "isOpaque"}) {
-                try {
-                    mCanOcclude = state.getClass().getMethod(name);
-                    break;
-                } catch (ReflectiveOperationException ignored) {
-                    // 尝试下一个候选名
-                }
-            }
-            for (String name : new String[]{"isOpaque", "isSolidBlock"}) {
-                try {
-                    mOpaque = state.getClass().getMethod(name);
-                    break;
-                } catch (ReflectiveOperationException ignored) {
-                    // 尝试下一个候选名
-                }
-            }
-        }
-        try {
-            if (mCanOcclude != null && (Boolean) mCanOcclude.invoke(state)) {
-                return BlockClass.OPAQUE;
-            }
-        } catch (ReflectiveOperationException ignored) {
-            // 回退到保守规则
+        // 原版判定：完整不透明立方体（stone/木板/模组整方块…）→ 遮挡邻居
+        if (state.isOpaque()) {
+            return BlockClass.OPAQUE;
         }
         String s = path;
-        if (s.contains("stairs") || s.contains("slab") || s.contains("fence")
-                || s.contains("door") || s.contains("trapdoor") || s.contains("wall")
-                || s.contains("torch") || s.contains("pressure_plate")
-                || s.contains("button") || s.contains("pane") || s.contains("bars")) {
-            return BlockClass.NONCUBE;
-        }
-        if (s.contains("leaves") || s.endsWith("flower") || s.contains("sapling")
-                || s.contains("bush") || s.contains("grass")) {
-            return BlockClass.CUTOUT;
-        }
-        if (s.equals("water") || s.equals("lava") || s.contains("water")) {
-            return BlockClass.LIQUID;
-        }
         if (s.contains("glass")) {
             return BlockClass.TRANSPARENT;
         }
-        return BlockClass.OPAQUE;
+        if (s.contains("water") || s.contains("lava")) {
+            return BlockClass.LIQUID;
+        }
+        if (s.contains("leaves") || s.contains("sapling") || s.contains("flower")
+                || s.contains("bush") || s.contains("grass") || s.contains("vine")
+                || s.contains("roots") || s.contains("crop") || s.contains("plant")
+                || s.contains("petal") || s.contains("lichen")) {
+            return BlockClass.CUTOUT;
+        }
+        // 非不透明且认不出形状（雪层/箱子/漏斗/花盆/蜡烛…以及任意模组装饰方块）：
+        // 必须按"不遮挡"处理，否则邻居朝它的面会被错误剔除，露出空洞。
+        // 保守取 NONCUBE（近似为完整方块但不遮挡）。
+        return BlockClass.NONCUBE;
     }
 }
