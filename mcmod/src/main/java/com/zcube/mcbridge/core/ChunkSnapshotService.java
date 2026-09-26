@@ -228,7 +228,8 @@ public final class ChunkSnapshotService {
     /** 3×3 邻域 → padded 体积 (18, H+2, 18) → 服务端贪心网格（与 Python 模式 A/B
      * 相同算法）。返回 quad 列表与区块级调色板。
      */
-    public record Meshed(List<Quad> quads, List<PalEntry> palette, int yBottom) {
+    public record Meshed(List<Quad> quads, List<PalEntry> palette, int yBottom,
+                         List<String> biomeNames) {
     }
 
     public Meshed mesh(String dim, int cx, int cz, int ymin, int ymax,
@@ -284,7 +285,7 @@ public final class ChunkSnapshotService {
                 }
             }
             var quads = com.zcube.mcbridge.mesh.ShellLod.shell(c16, g16);
-            return new Meshed(quads, pal, WORLD_MIN_Y + secLo * 16);
+            return new Meshed(quads, pal, WORLD_MIN_Y + secLo * 16, List.of());
         }
         // 交叉面片: CUTOUT 且非树叶（与 Python mesher.mesh_payload 规则一致）
         boolean[] cross = new boolean[pal.size()];
@@ -292,8 +293,77 @@ public final class ChunkSnapshotService {
             cross[i] = pal.get(i).cls() == BlockClass.CUTOUT
                     && !pal.get(i).name().contains("leaves");
         }
-        List<Quad> quads = GreedyMesher.mesh(cls, gid, cross, withAo, leavesFast);
-        return new Meshed(quads, pal, WORLD_MIN_Y + secLo * 16);
+        // 群系（R8）：4×4×4 采样成 padded id 数组，与 cls/gid 同形；下标即"归属格子"。
+        // 服务端把群系并入合并键，因此每个合并面片整体属于同一群系，客户端可按面取色。
+        List<String> biomeNames = new ArrayList<>();
+        byte[][][] bio = new byte[18][H + 2][18];
+        fillBiomes(w, cx, cz, secLo, H, biomeNames, bio);
+        List<Quad> quads = GreedyMesher.mesh(cls, gid, cross, bio, bioNeed(pal),
+                                             withAo, leavesFast);
+        return new Meshed(quads, pal, WORLD_MIN_Y + secLo * 16, biomeNames);
+    }
+
+    /**
+     * 哪些方块要把群系并入合并键（与客户端 `blocks.py` 共享表的染色声明同源）。
+     *
+     * 服务端没有资产包，只能按这张小表判断；加载资产包后客户端的面掩码可能更宽
+     * （例如草方块侧面的 overlay 层也染色），此时模式 A 会比模式 B 多拆一点。
+     * 未声明染色的方块跨群系合并没有观感问题（它们本就不取群系色）。
+     */
+    private static boolean[] bioNeed(List<PalEntry> pal) {
+        boolean[] need = new boolean[pal.size()];
+        for (int i = 0; i < pal.size(); i++) {
+            String n = pal.get(i).name().toLowerCase();
+            need[i] = n.equals("minecraft:grass_block") || n.contains("grass")
+                    || n.contains("leaves") || n.equals("minecraft:water")
+                    || n.contains("fern");
+        }
+        return need;
+    }
+
+    /**
+     * 填充 padded 群系 id 数组。id 0 保留给"未知"（列表首项为空串），名字表下标即 id。
+     * 以 4³ 为单位查询（与原版群系精度一致），同一 cell 只查一次。
+     */
+    private void fillBiomes(ServerWorld w, int cx, int cz, int secLo, int H,
+                            List<String> names, byte[][][] bio) {
+        names.add("");
+        Map<String, Byte> idOf = new HashMap<>();
+        Map<Long, Byte> cellCache = new HashMap<>();
+        int baseX = cx * 16;
+        int baseZ = cz * 16;
+        int baseY = WORLD_MIN_Y + secLo * 16;
+        for (int px = 0; px < 18; px++) {
+            int wx = baseX + px - 1;
+            for (int pz = 0; pz < 18; pz++) {
+                int wz = baseZ + pz - 1;
+                for (int py = 0; py < H + 2; py++) {
+                    int wy = baseY + py - 1;
+                    long ck = (((long) (wx >> 2)) << 40) | (((long) (wz >> 2)) << 20)
+                            | ((wy >> 2) & 0xFFFFFL);
+                    Byte id = cellCache.get(ck);
+                    if (id == null) {
+                        String nm = "";
+                        try {
+                            var hb = w.getBiome(new net.minecraft.util.math.BlockPos(wx, wy, wz));
+                            nm = hb.getKey().map(k -> k.getValue().toString()).orElse("");
+                        } catch (Exception ignore) {
+                            // 越界/未生成 -> 未知群系（客户端退回常量色）
+                        }
+                        id = idOf.get(nm);
+                        if (id == null) {
+                            id = (names.size() > 255) ? (byte) 0 : (byte) names.size();
+                            if (id != 0) {
+                                names.add(nm);
+                                idOf.put(nm, id);
+                            }
+                        }
+                        cellCache.put(ck, id);
+                    }
+                    bio[px][py][pz] = id;
+                }
+            }
+        }
     }
 
     private void fillVolume(ChunkPayload center, int secLo,

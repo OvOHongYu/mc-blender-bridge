@@ -166,10 +166,16 @@ def build_arrays(payload: dict):
 DIR_NAMES = ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]
 
 
-def encode_mcm1(dim, cx, cz, y_bottom, palette, quads, with_ao=True):
+def encode_mcm1(dim, cx, cz, y_bottom, palette, quads, with_ao=True,
+                biome_names=None, biome_ids=None):
     """quads: list[(verts int16 (4,3), dir int, block_gid, ao uint8(4,))]，
-    顶点顺序必须已是外向 CCW（与 ao 对齐）。palette: list[(class, name)]。"""
-    out = [MCM1_MAGIC, struct.pack("<B", 1), _pack_str(dim),
+    顶点顺序必须已是外向 CCW（与 ao 对齐）。palette: list[(class, name)]。
+
+    biome_names/biome_ids（MCM1 v2）：群系名表 + **每面**一个群系下标。服务端贪心
+    合并键包含群系（与客户端一致），因此一个合并面片必然整体属于同一群系，每面一个
+    id 就够（1B/面），无需下发整块群系数组。"""
+    ver = 2 if biome_names is not None else 1
+    out = [MCM1_MAGIC, struct.pack("<B", ver), _pack_str(dim),
            struct.pack("<iih", cx, cz, y_bottom),
            struct.pack("<H", len(palette))]
     for cls, name in palette:
@@ -184,13 +190,25 @@ def encode_mcm1(dim, cx, cz, y_bottom, palette, quads, with_ao=True):
         if with_ao:
             rec += struct.pack("<4B", int(ao[0]), int(ao[1]), int(ao[2]), int(ao[3]))
         out.append(rec)
+    if biome_names is not None:
+        # v2 追加段：群系名表 + 每面 1B 下标（面记录保持定长，便于批量解析）
+        qb = list(biome_ids) if biome_ids is not None else [0] * len(quads)
+        if len(qb) != len(quads):
+            raise ValueError("biome_ids 长度必须等于 quads 数")
+        out.append(struct.pack("<H", len(biome_names)))
+        for nm in biome_names:
+            out.append(_pack_str(nm))
+        out.append(bytes(int(x) & 0xFF for x in qb))
     return b"".join(out)
 
 
 def decode_mcm1(buf: bytes) -> dict:
+    """MCM1 v1（无群系）/ v2（追加 群系名表 + 每面 1B 群系下标）。
+
+    v2 的 "biomeNames"/"biomeIds" 供控制模式按群系调色（R8）；v1 两者为 None。"""
     assert buf[:4] == MCM1_MAGIC, "bad MCM1 magic"
     (ver,) = struct.unpack_from("<B", buf, 4)
-    assert ver == 1
+    assert ver in (1, 2), "unsupported MCM1 version %d" % ver
     off = 5
     dim, off = _read_str(buf, off)
     cx, cz, y_bottom = struct.unpack_from("<iih", buf, off)
@@ -223,10 +241,23 @@ def decode_mcm1(buf: bytes) -> dict:
     else:
         aos = np.full((nq, 4), 3, np.uint8)
         off += nq * rec
-    assert off == end and end == len(buf), f"MCM1 trailing bytes: {len(buf) - end}"
+    if ver == 1:
+        assert off == end and end == len(buf), f"MCM1 trailing bytes: {len(buf) - end}"
+        bnames, bids = None, None
+    else:
+        (bn,) = struct.unpack_from("<H", buf, off)
+        off += 2
+        bnames = []
+        for _ in range(bn):
+            nm, off = _read_str(buf, off)
+            bnames.append(nm)
+        bids = np.frombuffer(buf, np.uint8, nq, off).copy()
+        off += nq
+        assert off == len(buf), f"MCM1 v2 trailing bytes: {len(buf) - off}"
     return {"dim": dim, "cx": cx, "cz": cz, "yBottom": y_bottom,
             "palette": palette, "verts": verts, "dirs": dirs,
-            "blocks": blocks, "aos": aos, "withAo": with_ao}
+            "blocks": blocks, "aos": aos, "withAo": with_ao,
+            "biomeNames": bnames, "biomeIds": bids}
 
 
 # ------------------------------------------------------------- versions ----

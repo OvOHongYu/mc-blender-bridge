@@ -193,7 +193,7 @@ public final class ApiServer {
         List<Payloads.PalEntry> pal = meshed.palette();
         List<Payloads.Quad> quads = meshed.quads();
         byte[] body = zlib(Mcm1Writer.write(dim, q.getInt("cx"), q.getInt("cz"),
-                meshed.yBottom(), pal, quads, lod < 2));
+                meshed.yBottom(), pal, quads, lod < 2, meshed.biomeNames()));
         binary(ex, 200, body, "application/octet-stream", 2);
     }
 

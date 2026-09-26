@@ -26,12 +26,18 @@ public final class Payloads {
         public final int dir;         // 0..5 = +X,-X,+Y,-Y,+Z,-Z
         public final int block;       // 区块级调色板下标
         public final int[] ao;        // 4，与顶点对齐（with_ao=false 时全 3）
+        public final int biome;       // 群系名表下标（MCM1 v2；无群系数据时为 0）
 
         public Quad(short[] verts, int dir, int block, int[] ao) {
+            this(verts, dir, block, ao, 0);
+        }
+
+        public Quad(short[] verts, int dir, int block, int[] ao, int biome) {
             this.verts = verts;
             this.dir = dir;
             this.block = block;
             this.ao = ao;
+            this.biome = biome;
         }
     }
 }

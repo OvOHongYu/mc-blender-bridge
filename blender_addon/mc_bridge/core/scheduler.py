@@ -357,10 +357,17 @@ class Scheduler:
                                  lod=lod, ao=(lod == 0),
                                  leaves=("fast" if self.p.leaves_fast else "fancy"),
                                  **kw)
+            bio = m.get("biome") if self.p.biome_tint else None
+            if bio is None and self.p.biome_tint and m.get("biomeIds") is not None:
+                # 控制模式：服务端按面下发群系 id（MCM1 v2），转成与存档模式同构的
+                # (padded 群系 id, 查色表) 交给 geo_from_arrays
+                bio = mesher.biome_from_quads(m["verts"], m["dirs"],
+                                              m.get("biomeNames"),
+                                              m["biomeIds"], pack)
             geos.append(geo_from_arrays(
                 m["verts"], m["dirs"], m["blocks"], m["aos"],
                 [n for _, n in m["palette"]], models=m.get("models"), pack=pack,
-                biome=(m.get("biome") if self.p.biome_tint else None)))
+                biome=bio))
             offs.append((16.0 * dx, float(m.get("yBottom", self.p.ymin) - self.p.ymin),
                          16.0 * dz))
         if g == 1:

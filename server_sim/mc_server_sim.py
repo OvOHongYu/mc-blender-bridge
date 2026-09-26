@@ -269,7 +269,12 @@ class World:
             remap = np.zeros(int(uniq.max()) + 1, np.uint16)
             for k, u in enumerate(uniq):
                 remap[u] = k
-            sections.append({"palette": pal, "indices": remap[cells]})
+            # 群系：按世界 x 每 8 格交替（0=plains / 1=desert），用于控制模式染色测试。
+            # 4×4×4 采样、索引序 (y,z,x)，与方块一致；边界落在 8 的倍数上（4 的倍数）。
+            cellx = (((cx * 16 + np.arange(4) * 4) // 8) % 2).astype(np.uint8)
+            ids4 = np.broadcast_to(cellx.reshape(1, 1, 4), (4, 4, 4)).copy()
+            sections.append({"palette": pal, "indices": remap[cells],
+                             "biomes": (["minecraft:plains", "minecraft:desert"], ids4)})
         return {"dim": DIM, "cx": cx, "cz": cz, "yBottom": yb, "sections": sections}
 
     def setblock(self, x, y, z, name):
@@ -305,11 +310,22 @@ class World:
                 payloads[(dx, dz)] = self.payload(cx + dx, cz + dz, ymin, ymax)
         if lod == 2:
             quads, pal, _, _ = mesher.shell_payload(payloads)
-            r = {"quads": quads, "pal": pal, "yBottom": payloads[(0, 0)]["yBottom"]}
+            r = {"quads": quads, "pal": pal, "yBottom": payloads[(0, 0)]["yBottom"],
+                 "biomeNames": None, "biomeIds": None}
         else:
-            cls, gid, H, pal = mesher.assemble_padded(payloads)
-            quads, _ = mesher.mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast)
-            r = {"quads": quads, "pal": pal, "yBottom": payloads[(0, 0)]["yBottom"]}
+            cls, gid, H, pal, bio, bio_names = mesher.assemble_padded(
+                payloads, with_biome=True)
+            # 只在"声明染色"的方块上把群系并入合并键（与客户端 _palette_tints 同规则），
+            # 否则未染色方块也会被拆开，A/B 两条路径面数就不一致了
+            _t, _k, need = mesher._palette_tints([n for _c, n in pal], None)
+            quads, _ = mesher.mesh_padded(cls, gid, with_ao=with_ao,
+                                          leaves_fast=leaves_fast, biome=bio,
+                                          bio_need=need)
+            # 按面下发群系 id（MCM1 v2）：合并键含群系，故每面恰属一个群系
+            names = [("" if n is None else n) for n in bio_names]
+            qids = mesher.biome_ids_for_quads(quads, bio)
+            r = {"quads": quads, "pal": pal, "yBottom": payloads[(0, 0)]["yBottom"],
+                 "biomeNames": names, "biomeIds": qids}
         with self._mesh_lock:
             self._mesh_cache[key] = r
             self._mesh_cache.move_to_end(key)
@@ -428,7 +444,9 @@ class Handler(BaseHTTPRequestHandler):
                                     int(q.get("ymax", WORLD_MIN_Y + WORLD_HEIGHT)),
                                     lod=lod, with_ao=with_ao, leaves_fast=leaves_fast)
                 m = codec.encode_mcm1(DIM, int(q["cx"]), int(q["cz"]), r["yBottom"],
-                                      r["pal"], r["quads"], with_ao=lod != 2)
+                                      r["pal"], r["quads"], with_ao=lod != 2,
+                                      biome_names=r.get("biomeNames"),
+                                      biome_ids=r.get("biomeIds"))
                 self._binary(m)
             elif u.path == "/api/entities":
                 ents = self.world.entities.get((int(q["cx"]), int(q["cz"])), [])

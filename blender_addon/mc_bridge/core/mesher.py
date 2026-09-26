@@ -958,6 +958,36 @@ def mesh_payload_biome(payloads, group=1, with_ao=True, leaves_fast=False,
             ((bio, biome_lut(pack, bio_names)) if biome else None))
 
 
+def biome_ids_for_quads(quads, bio):
+    """服务端侧：padded 群系数组 + quads -> 每面一个群系 id（MCM1 v2 要下发的东西）。
+
+    与 `biome_from_quads` 互为逆运算，共用 `_quad_cells` 的索引约定。"""
+    if not quads or bio is None:
+        return np.zeros(0, np.uint8)
+    vf = np.asarray([q[0] for q in quads], np.float32)
+    dd = np.asarray([q[1] for q in quads], np.uint8)
+    cells = _quad_cells(vf, dd)
+    return bio[cells[:, 0], cells[:, 1], cells[:, 2]]
+
+
+def biome_from_quads(verts, dirs, names, ids, pack):
+    """控制模式：服务端按面下发的群系 id（MCM1 v2）-> 与存档模式同构的 (pids, lut)。
+
+    服务端的贪心合并键包含群系，所以一个合并面片必然整体属于同一群系，每面一个 id
+    就够。这里用 `_quad_cells` 反推每个面所属的格子并写回一块 padded 数组，索引约定
+    与 `geo_from_arrays` 完全一致（同一个 `_quad_cells`）。"""
+    if not names or ids is None or verts.shape[0] == 0:
+        return None
+    cells = _quad_cells(np.asarray(verts, np.float32), np.asarray(dirs))
+    # 索引必须用**原始格坐标**（geo_from_arrays 内部用同一个 _quad_cells 的结果直接
+    # 索引 pids，不像存档路径那样带偏移），因此数组各轴覆盖到最大格坐标即可。
+    hi = cells.max(axis=0)
+    shape = tuple(int(hi[k]) + 1 for k in range(3))
+    pids = np.zeros(shape, np.uint8)
+    pids[cells[:, 0], cells[:, 1], cells[:, 2]] = ids
+    return pids, biome_lut(pack, list(names))
+
+
 def shell_payload(payloads, center=(0, 0)):
     """3×3 payload 字典 -> LOD2 壳 quads（只用中心区块 + 邻居高度边界按 air）。"""
     cp = payloads[center]

@@ -42,6 +42,32 @@ public final class GreedyMesher {
      */
     public static List<Quad> mesh(byte[][][] clsIn, short[][][] gid,
                                   boolean[] cross, boolean withAo, boolean leavesFast) {
+        return mesh(clsIn, gid, cross, null, withAo, leavesFast);
+    }
+
+    /**
+     * bio: 与 cls 同形的群系 id（18, H+2, 18），null = 不下发群系（MCM1 v1）。
+     *
+     * 群系进入**合并键**（高位 24..31）：不这样做的话一个贪心矩形可能横跨群系边界，
+     * 而报文每面只带一个群系 id，边界处就会串色。这也保证每个合并面片整体属于同一
+     * 群系，因此 id 与几何是对齐的（客户端可直接按面取色）。
+     */
+    public static List<Quad> mesh(byte[][][] clsIn, short[][][] gid,
+                                  boolean[] cross, byte[][][] bio,
+                                  boolean withAo, boolean leavesFast) {
+        return mesh(clsIn, gid, cross, bio, null, withAo, leavesFast);
+    }
+
+    /**
+     * bioNeed: 按 gid 的"是否声明染色"。只有声明染色的方块才把群系并入合并键 ——
+     * 与客户端 `_palette_tints` 的 need 同规则，否则未染色方块也会被拆开，
+     * 模式 A（本地网格）与模式 B（服务端网格）的面数就不一致了。
+     * null = 全部按不染色处理（等同不下发群系）。
+     */
+    public static List<Quad> mesh(byte[][][] clsIn, short[][][] gid,
+                                  boolean[] cross, byte[][][] bio,
+                                  boolean[] bioNeed,
+                                  boolean withAo, boolean leavesFast) {
         byte[][][] cls = leavesFast ? fastLeaves(clsIn, gid, cross) : clsIn;
         List<Quad> quads = new ArrayList<>();
         int[] dims = {cls.length, cls[0].length, cls[0][0].length};
@@ -92,6 +118,13 @@ public final class GreedyMesher {
                                     sig = c0 | (c1 << 2) | (c2 << 4) | (c3 << 6);
                                 }
                                 k = ((ga + 1) << 8) | sig;
+                                if (bio != null && ga >= 0 && ga < bioNeedLen(bioNeed)
+                                        && bioNeed[ga]) {
+                                    // 归属格子与 ga 相同（+dir 面属 i，-dir 面属 i+1）
+                                    int bo = positive ? cellBio(bio, d, i, u, v)
+                                                      : cellBio(bio, d, i + 1, u, v);
+                                    k |= (bo & 0xFF) << 24;
+                                }
                             }
                             key[i][u * nV + v] = k;
                             if (withAo) {
@@ -104,7 +137,7 @@ public final class GreedyMesher {
             emitPlanes(quads, key, aoP, d, positive, withAo, nU, nV);
             }
         }
-        emitCrosses(quads, cls, gid, cross);
+        emitCrosses(quads, cls, gid, cross, bio);
         return quads;
     }
 
@@ -173,7 +206,8 @@ public final class GreedyMesher {
     private static void emitQuad(List<Quad> quads, int k, int i, int u0, int v0,
                                  int w, int h, int d, boolean positive,
                                  byte[] aoPlane, int nV) {
-        int blk = (int) (k >> 8) - 1;
+        int blk = (int) ((k >> 8) & 0xFFFF) - 1;      // 掩码：高位 24..31 是群系
+        int biome = (k >>> 24) & 0xFF;
         int lu = u0 - 1;
         int lv = v0 - 1;
         int[] cu = {lu, lu + w, lu + w, lu};
@@ -201,7 +235,7 @@ public final class GreedyMesher {
         for (int vi = 0; vi < 4; vi++) {
             ao[vi] = aoC[order[vi]];
         }
-        quads.add(new Quad(verts, d * 2 + (positive ? 0 : 1), blk, ao));
+        quads.add(new Quad(verts, d * 2 + (positive ? 0 : 1), blk, ao, biome));
     }
 
     private static void zeroWindow(int[][] key, boolean positive,
@@ -228,7 +262,8 @@ public final class GreedyMesher {
     /** 交叉面片植物: 对角两个面片，dir=0(+X)->side 贴图，AO 恒满。
      *  只发射一次——消费端（Blender）默认双面渲染；再补反向绕序会与之共面重叠。 */
     private static void emitCrosses(List<Quad> quads, byte[][][] cls,
-                                    short[][][] gid, boolean[] cross) {
+                                    short[][][] gid, boolean[] cross,
+                                    byte[][][] bio) {
         if (cross == null) {
             return;
         }
@@ -250,9 +285,10 @@ public final class GreedyMesher {
                             bx + 1, by + 1, bz + 1, bx, by + 1, bz};
                     int[] b = {bx, by, bz + 1, bx + 1, by, bz,
                             bx + 1, by + 1, bz, bx, by + 1, bz + 1};
+                    int bIdx = bio == null ? 0 : (bio[x][y][z] & 0xFF);
                     for (int[] v : new int[][]{a, b}) {
                         quads.add(new Quad(toShorts(v), (short) 0, (short) g,
-                                new int[]{3, 3, 3, 3}));
+                                new int[]{3, 3, 3, 3}, bIdx));
                     }
                 }
             }
@@ -281,6 +317,18 @@ public final class GreedyMesher {
             case 1 -> g[u][i][v] & 0xFFFF;
             default -> g[u][v][i] & 0xFFFF;
         };
+    }
+
+    private static int cellBio(byte[][][] b, int d, int i, int u, int v) {
+        return switch (d) {
+            case 0 -> b[i][u][v] & 0xFF;
+            case 1 -> b[u][i][v] & 0xFF;
+            default -> b[u][v][i] & 0xFF;
+        };
+    }
+
+    private static int bioNeedLen(boolean[] bioNeed) {
+        return bioNeed == null ? 0 : bioNeed.length;
     }
 
     /** 经典 AO: 双侧遮挡 -> 0，否则 3 − (s1+s2+corner)。 */

@@ -366,6 +366,88 @@ class TestBiomeTintToggle:
         assert tuple(int(x) for x in v_off[0, 0, :3]) == const, v_off[0, 0, :3]
 
 
+class _BiomeFake:
+    """假包：草方块顶面染色；平原/沙漠给两种截然不同的颜色便于断言。"""
+
+    def tint_mask(self, name):
+        return 1 if "grass" in name else 0
+
+    def biome_tint(self, name):
+        if name == "minecraft:plains":
+            return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        if name == "minecraft:desert":
+            return ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0))
+        return None
+
+    def overlay_faces(self, vis):
+        return None
+
+    def variant_indices(self, b, p=None):
+        return []
+
+
+class TestControlModeBiomeTint:
+    """控制模式（MCM1 v2）：服务端按面下发群系 id -> 插件按群系染色。
+
+    走完整链路：模拟服务器网格 -> encode_mcm1(v2) -> decode_mcm1 ->
+    biome_from_quads -> geo_from_arrays。"""
+
+    @classmethod
+    def _msg(cls):
+        sim_dir = os.path.join(ROOT, "server_sim")
+        if sim_dir not in sys.path:
+            sys.path.insert(0, sim_dir)
+        import mc_server_sim as S                            # noqa: E402
+        from mc_bridge.core import codec                     # noqa: E402
+        w = S.World()
+        r = w.mesh(0, 0, -64, 320, lod=0, with_ao=True, leaves_fast=False)
+        buf = codec.encode_mcm1("minecraft:overworld", 0, 0, r["yBottom"], r["pal"],
+                                r["quads"], with_ao=True,
+                                biome_names=r["biomeNames"], biome_ids=r["biomeIds"])
+        assert buf[4] == 2, "带群系时应写 MCM1 v2"
+        return codec.decode_mcm1(buf)
+
+    def test_roundtrip_carries_per_quad_biome(self):
+        m = self._msg()
+        assert m["biomeNames"] is not None
+        assert len(m["biomeIds"]) == m["verts"].shape[0]
+        # 模拟服务器按世界 x 每 8 格交替两种群系 -> 至少出现两个不同的 id
+        assert len(set(int(x) for x in m["biomeIds"])) >= 2
+
+    def test_v1_still_readable(self):
+        """旧版（无群系）报文必须仍能解析。"""
+        from mc_bridge.core import codec                     # noqa: E402
+        q = [(np.zeros((4, 3), np.int16), 2, 0, np.array([3, 3, 3, 3], np.uint8))]
+        buf = codec.encode_mcm1("minecraft:overworld", 0, 0, -64,
+                                [(1, "minecraft:stone")], q, with_ao=True)
+        assert buf[4] == 1
+        m = codec.decode_mcm1(buf)
+        assert m["biomeIds"] is None and m["verts"].shape[0] == 1
+
+    def test_tints_follow_server_biome(self):
+        m = self._msg()
+        pack = _BiomeFake()
+        bio = M.biome_from_quads(m["verts"], m["dirs"], m["biomeNames"],
+                                 m["biomeIds"], pack)
+        assert bio is not None
+        geo = M.geo_from_arrays(m["verts"], m["dirs"], m["blocks"], m["aos"],
+                                [n for _, n in m["palette"]], pack=pack, biome=bio)
+        vc = np.asarray(geo["vcol"]).reshape(-1, 4, 4)
+        pal = [n for _, n in m["palette"]]
+        tops = [i for i in range(m["verts"].shape[0])
+                if int(m["dirs"][i]) == 2 and "grass" in pal[int(m["blocks"][i])]]
+        assert tops, "模拟世界里应有草方块顶面"
+        reds = sum(1 for i in tops if tuple(vc[i, 0, :3]) == (255, 0, 0))
+        blues = sum(1 for i in tops if tuple(vc[i, 0, :3]) == (0, 0, 255))
+        assert reds and blues, "两种群系的草顶应分别为平原红/沙漠蓝"
+
+    def test_toggle_off_uses_constant(self):
+        """开关关闭时不消费服务端群系数据（返回 None，退回常量色）。"""
+        m = self._msg()
+        assert m["biomeIds"] is not None
+        assert M.biome_from_quads(m["verts"], m["dirs"], None, None, _BiomeFake()) is None
+
+
 class TestMeshBiomeKey:
     """合并键只在声明染色的方块上引入群系维度。"""
 
