@@ -117,6 +117,34 @@ def default_tint(name):
     return (1.0, 1.0, 1.0)
 
 
+# 染色类别（R8）：与资产包 v6 群系染色的 grass/foliage/water 三个通道对应
+TINT_KIND_NONE, TINT_KIND_GRASS, TINT_KIND_FOLIAGE, TINT_KIND_WATER = 0, 1, 2, 3
+
+
+def tint_kind(name):
+    """方块染色的类别（0 无 / 1 草 / 2 叶 / 3 水）。
+
+    按名字判定（与 default_tint 的启发式同源）；共享表里有染色但名字未命中的
+    按草处理（如 grass_block 的顶面 overlay）。具体哪些面参与染色仍由资产包的
+    tint_mask 决定，本函数只回答"取哪个通道的群系颜色"。
+    """
+    base = base_name(name)
+    low = base.lower()
+    if "water" in low:
+        return TINT_KIND_WATER
+    if ("leaves" in low or "vine" in low or "fern" in low
+            or "azalea" in low or "roots" in low):
+        return TINT_KIND_FOLIAGE
+    if ("grass" in low or "lily" in low or "sapling" in low or "plant" in low
+            or "crop" in low or "wheat" in low or "flower" in low
+            or "cactus" in low or "sugar_cane" in low or "moss" in low):
+        return TINT_KIND_GRASS
+    gid = INDEX.get(base)
+    if gid is not None and TINT[gid]:
+        return TINT_KIND_GRASS
+    return TINT_KIND_NONE
+
+
 def texture_name(name, face):
     """face ∈ top/side/bottom -> 贴图名（供 /api/texture 使用）。"""
     base = base_name(name)

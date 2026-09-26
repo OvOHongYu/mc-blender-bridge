@@ -321,7 +321,7 @@ class Scheduler:
                 nkey, lambda k=nkey: self.client.chunk(
                     k[0], k[1], k[2], self.p.ymin, self.p.ymax))
         from . import assets
-        quads, pal, _, models = mesher.mesh_payload(
+        quads, pal, _, models, bio = mesher.mesh_payload_biome(
             payloads, group=g, with_ao=(lod == 0), leaves_fast=self.p.leaves_fast,
             pack=assets.current(), fluids=True)
         import numpy as np
@@ -333,7 +333,7 @@ class Scheduler:
         aos = np.array([q[3] for q in quads], np.uint8).reshape(-1, 4)
         from .mesher import geo_from_arrays
         return geo_from_arrays(verts, dirs, blks, aos, [n for _, n in pal],
-                               models=models, pack=assets.current())
+                               models=models, pack=assets.current(), biome=bio)
 
     def _fetch_geo_server(self, dim, gx, gz, lod):
         """组内逐区块取服务端网格，平移到组局部坐标后拼成一个 geo。
@@ -353,7 +353,8 @@ class Scheduler:
                                  leaves=("fast" if self.p.leaves_fast else "fancy"))
             geos.append(geo_from_arrays(
                 m["verts"], m["dirs"], m["blocks"], m["aos"],
-                [n for _, n in m["palette"]], models=m.get("models"), pack=pack))
+                [n for _, n in m["palette"]], models=m.get("models"), pack=pack,
+                biome=m.get("biome")))
             offs.append((16.0 * dx, float(m.get("yBottom", self.p.ymin) - self.p.ymin),
                          16.0 * dz))
         if g == 1:

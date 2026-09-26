@@ -240,23 +240,37 @@
 
 ## R8 群系染色（biome tint）\[P1·难]
 
-**现状**：草/叶/水的染色是**平原群系常量**（`core/blocks.py` 的
-`TINT_GRASS/TINT_FOLIAGE/TINT_WATER`）+ 方块名启发式，沙漠草 / 雪原草 /
-沼泽水一律显示成平原色。`.mca` 与 MCC1 都带 biome 数据，但当前完全没有读取
-（全库无 biome 相关代码）。
+**存档模式：✅ 已完成** · 控制模式：待做
 
-**方案**（横跨存档解析、协议、烘焙管线与网格器，建议独立分支推进）：
+**做法**（方案 B：烘焙真值表，不在插件里复刻算法）
 
-- **数据源**：存档模式读 section 的 biome 调色板（1.18+ 每 section 4×4×4 = 64 项，
-  按 4 格精度取列）；控制模式需扩模组 API，把 biome 随区块下发（协议加 biome 段）；
-- **配色**：烘焙 `assets/minecraft/textures/colormap/{grass,foliage}.png` 与
-  `biomes/*.json` —— `effects.grass_color/foliage_color/water_color` 优先，
-  缺省按 `temperature/downfall` 采 colormap；
-- **网格**：tint 需进入贪心合并键（与 AO 同列），跨群系边界处拆四边形，
-  否则合并出的大四边形会跨越群系；
-- **兜底**：无 biome 数据时退回现有平原常量（行为不变）。
+- **配色**：烘焙期从客户端 jar 的 `data/minecraft/worldgen/biome/*.json` 与
+  `assets/minecraft/textures/colormap/{grass,foliage}.png` 算出每个群系的
+  `(grass, foliage, water)` RGB，写进 **MCBA v6 群系段**（64 项）；
+- **取值公式与常量全部对齐原版字节码**，不靠推理：
+  `GrassColors.getColor` 的 `k = (j << 8) | i` 索引（colormap png 按行主序）、
+  `clamp(temperature, 0, 1)`（沙漠的 `temperature=2.0` 靠这个兜住）、
+  `DARK_FOREST` 的 `((c & 0xFEFEFE) + 0x28340A) >> 1`、`SWAMP` 的 `6975545`；
+  `water_color` 走 biome effects 本身，不走 colormap；
+- **数据源**：`anvil._decode_biomes` 读 section 的 4×4×4 调色板（bits 下限 1，
+  且兼容"只有 palette 没有 data"的单值形态——这是绝大多数 section 的形态），
+  索引序与方块一致 `(y, z, x)`；
+- **网格**：群系维度进入贪心合并键，**只对声明染色的方块生效**；顶点色改为按
+  "面所属格子的群系"取色，覆盖完整方块面 / 烘焙模型面 / 流体几何三条路径；
+- **兜底**：无群系数据（或群系不在表里）时行为与改前完全一致。
 
-**验收**：沼泽草偏黄绿、雪原草偏灰、沙漠草偏枯黄，且相邻群系边界无颜色错位。
+**验证**
+
+- Python 复刻 vs 原版 Java **逐点对拍 0/64 不一致**（`tools/biome_colors/ProbeColormap.java`）；
+- plains/forest/swamp/desert/snowy_plains/jungle/taiga/dark_forest **八色命中 wiki 真值**；
+- 真实存档端到端：swamp `#6A7039`、desert `#BFB755`、plains `#91BD59` 三色精确命中，
+  且与 `blocks.py` 原有的"平原常量"完全自洽（平原区颜色不变）；
+- 几何代价：真实 fillbiome 布局 +0.05%；密集群系最坏 +20.8%，
+  "只让染色方块进键"可压到 **+1.3~1.6%**；
+- 回归测试 `tests/test_biome_tint.py`（20 例）。
+
+**剩余（控制模式）**：需扩模组 API 把 biome 随区块下发（协议加 biome 段）；
+当前控制模式仍走常量色。
 
 ## 已知缺陷修复追踪
 

@@ -209,6 +209,33 @@ def _decode_block_states(bs):
     return names, idx.astype(np.uint16)
 
 
+def _decode_biomes(bs):
+    """biomes 字典 -> (名字列表, indices uint8(64))。
+
+    与 _decode_block_states 同构但口径不同：
+      - 元素数是 4×4×4 = 64（方块是 16×16×16 = 4096）
+      - bits 下限是 1（PalettedContainer 对 biomes 用 MIN_BITS=1，方块是 4）
+      - 绝大多数 section 是**单值形态**（只有 palette、没有 data）
+    索引序与方块一致：(y, z, x)，即 y*16 + z*4 + x。
+    """
+    pal = bs.get("palette") or []
+    if not pal:
+        return [], np.zeros(64, np.uint8)
+    names = []
+    for p in pal:
+        if isinstance(p, dict):
+            names.append(str(p.get("Name") or p.get("id") or "minecraft:plains"))
+        else:
+            names.append(str(p))
+    data = bs.get("data")
+    if len(pal) == 1 or data is None or len(data) == 0:
+        return names, np.zeros(64, np.uint8)
+    arr = np.asarray(data, np.uint64)
+    bits = max(1, (len(pal) - 1).bit_length())
+    idx = _unpack_indices(arr, bits, n=64)
+    return names, np.clip(idx, 0, len(pal) - 1).astype(np.uint8)
+
+
 def _classify(name):
     """方块状态名 -> class 字节（共享表优先，其次资产包按状态分类，兜底不透明）。"""
     base = name.split("[", 1)[0]
@@ -436,7 +463,13 @@ class AnvilWorld:
             if len(names) == 1 and names[0] == "minecraft:air":
                 continue
             pal = [(_classify(n), n) for n in names]
-            sections[si] = {"palette": pal, "indices": idx}
+            bio = s.get("biomes")
+            if isinstance(bio, dict):
+                bnames, bidx = _decode_biomes(bio)
+            else:
+                bnames, bidx = [], None
+            sections[si] = {"palette": pal, "indices": idx,
+                            "biomes": (bnames, bidx)}
         return {"dim": dim, "cx": cx, "cz": cz, "yBottom": yb, "sections": sections}
 
 
@@ -534,19 +567,24 @@ class SaveClient:
         if lod == 2:
             quads, pal, _, _ = mesher.shell_payload(payloads)
             models = []
+            bioinfo = None
         else:
             from . import assets
-            cls, gid, H, pal = mesher.assemble_padded(payloads)
+            pack = assets.current()
+            cls, gid, H, pal, bio, bio_names = mesher.assemble_padded(
+                payloads, with_biome=True)
+            _tints, _kinds, need = mesher._palette_tints([n for _c, n in pal], pack)
             quads, models = mesher.mesh_padded(
                 cls, gid, with_ao=with_ao, leaves_fast=(leaves == "fast"),
-                palette=pal, pack=assets.current())
+                palette=pal, pack=pack, biome=bio, bio_need=need)
+            bioinfo = (bio, mesher.biome_lut(pack, bio_names))
         nq = len(quads)
         verts = np.array([q[0] for q in quads], np.int16) if nq else np.zeros((0, 4, 3), np.int16)
         dirs = np.array([q[1] for q in quads], np.uint8)
         blocks_ = np.array([q[2] for q in quads], np.uint16)
         aos = np.array([q[3] for q in quads], np.uint8).reshape(-1, 4)
         out = {"verts": verts, "dirs": dirs, "blocks": blocks_, "aos": aos,
-               "models": models,
+               "models": models, "biome": bioinfo,
                "palette": [(c, n) for c, n in pal],
                "yBottom": payloads[(0, 0)]["yBottom"]}
         with self.world.lock:

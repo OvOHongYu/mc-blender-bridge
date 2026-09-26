@@ -17,8 +17,8 @@ import struct
 import zlib
 
 MAGIC = b"MCBA1"
-VERSION = 5                  # 当前格式版本（读取端兼容 v1..v5）
-_SUPPORTED = (1, 2, 3, 4, 5)
+VERSION = 6                  # 当前格式版本（读取端兼容 v1..v6）
+_SUPPORTED = (1, 2, 3, 4, 5, 6)
 _V2_SCALE = 16.0             # v2 顶点 -> 1/16 方块单位
 _NONE_TEX = 0xFFFF           # 变体级信息里"该面无贴图"的哨兵
 
@@ -41,6 +41,7 @@ class AssetPack:
         self.block_use_model = {}   # name -> 1 表示应注入烘焙模型几何
         self.paintings = {}         # 画变体名 -> (w, h, tex_id)（v4 起；R5）
         self.entity_models = {}     # 实体模型名 -> {"texW","texH","tex","parts"}（v5；R5）
+        self.biome_colors = {}      # 群系名 -> (grass, foliage, water) 0xRRGGBB（v6；R8）
         self._png_cache = {}
 
     # ------------------------------------------------------------ 加载 ----
@@ -163,6 +164,17 @@ class AssetPack:
                 off += 4
                 self.entity_models[name] = json.loads(buf[off:off + ln].decode("utf-8"))
                 off += ln
+
+        if ver >= 6:
+            # 群系染色表（R8）：biome -> (grass, foliage, water)，均 0xRRGGBB
+            (nbc,) = struct.unpack_from("<I", buf, off)
+            off += 4
+            for _ in range(nbc):
+                name, off = _rstr(buf, off)
+                g, f, wc = struct.unpack_from("<III", buf, off)
+                off += 12
+                self.biome_colors[name] = (int(g), int(f), int(wc))
+
         assert off == len(buf), "MCBA1 trailing bytes: %d" % (len(buf) - off)
         return self
 
@@ -194,6 +206,14 @@ class AssetPack:
         png += chunk(b"IEND", b"")
         self._png_cache[tid] = png
         return png
+
+    def biome_tint(self, biome):
+        """群系 -> (grass, foliage, water)，每项 (r, g, b) 0..1；未知返回 None。"""
+        v = self.biome_colors.get(biome)
+        if v is None:
+            return None
+        return tuple(tuple(((x >> sh) & 0xFF) / 255.0 for sh in (16, 8, 0))
+                     for x in v)
 
     def default_faces(self, block):
         """(top, side, bottom) 贴图 id 或 None。传入方块状态名时按其状态解析。"""

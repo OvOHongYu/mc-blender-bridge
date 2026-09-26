@@ -30,14 +30,17 @@ _FLIP_POS = (False, True, False)
 
 # ------------------------------------------------------------ 体积拼装 ----
 
-def assemble_padded(payloads, group=1):
+def assemble_padded(payloads, group=1, with_biome=False):
     """payloads: dict[(dx,dz)] -> MCC1 payload 或 None（缺失按 air）。
 
     group = 区块组边长（1 = 单区块，即旧行为）。键的取值 [0, group-1] 是组本体，
     -1 与 group 各是外圈一格（邻居区块），供组边界剔除面子。返回
     (cls, gid, H, palette)，数组形状 (16*group+2, H+2, 16*group+2)；
     palette 以 (0,0) 区块的区块级调色板为基，其余按名字重映射并入
-    （与 Java fillVolume 一致）。"""
+    （与 Java fillVolume 一致）。
+
+    with_biome=True 时追加返回 (bio, bio_names)：bio 与 cls 同形状，值为群系
+    id（0 = 未知，退回常量色）；bio_names[id] 是群系名（bio_names[0] is None）。"""
     cp = payloads[(0, 0)]
     h_secs = len(cp["sections"])
     H = h_secs * 16
@@ -45,6 +48,9 @@ def assemble_padded(payloads, group=1):
     span = n + 2
     big_cls = np.zeros((span, H, span), np.uint8)
     big_gid = np.zeros((span, H, span), np.uint16)
+    big_bio = np.zeros((span, H, span), np.uint8) if with_biome else None
+    bio_names = [None] if with_biome else []
+    bio_ids = {}                                 # 群系名 -> id（从 1 开始）
 
     _, _, pal0, _ = build_arrays(cp)
     name2gid = {name: i for i, (c, name) in enumerate(pal0)}
@@ -68,6 +74,8 @@ def assemble_padded(payloads, group=1):
                         ext_pal.append((c, name))
                         remap[i] = len(ext_pal) - 1
                 gid = remap[gid]
+            bio = (_biome_block_array(payload, bio_ids, bio_names)
+                   if with_biome else None)
             # 该区块在 padded 坐标里的区间 [x0, x1) × [z0, z1)；组外圈只落进 1 格
             x0, x1 = 16 * dx + 1, 16 * dx + 17
             z0, z1 = 16 * dz + 1, 16 * dz + 17
@@ -80,12 +88,92 @@ def assemble_padded(payloads, group=1):
             sub_gid = gid[:, sz:sz + tz1 - tz0, sx:sx + tx1 - tx0]
             big_cls[tx0:tx1, :, tz0:tz1] = np.transpose(sub_cls, (2, 0, 1))
             big_gid[tx0:tx1, :, tz0:tz1] = np.transpose(sub_gid, (2, 0, 1))
+            if with_biome:
+                sub_bio = bio[:, sz:sz + tz1 - tz0, sx:sx + tx1 - tx0]
+                big_bio[tx0:tx1, :, tz0:tz1] = np.transpose(sub_bio, (2, 0, 1))
 
     cls = np.zeros((span, H + 2, span), np.uint8)
     gid = np.zeros((span, H + 2, span), np.uint16)
     cls[:, 1:H + 1, :] = big_cls
     gid[:, 1:H + 1, :] = big_gid
-    return cls, gid, H, ext_pal
+    if not with_biome:
+        return cls, gid, H, ext_pal
+    out_bio = np.zeros((span, H + 2, span), np.uint8)
+    out_bio[:, 1:H + 1, :] = big_bio
+    return cls, gid, H, ext_pal, out_bio, bio_names
+
+
+def _biome_block_array(payload, bio_ids, bio_names):
+    """payload -> (H,16,16) uint8 群系 id 数组（[y,z,x]，0 = 未知）。
+
+    section 的 biomes 是 4×4×4 采样，按 (y,z,x) 索引；展开成逐格只需
+    各轴 repeat 4。索引序与方块一致（已用真实存档的 fillbiome 边界核对过）。"""
+    hs = len(payload["sections"])
+    out = np.zeros((hs * 16, 16, 16), np.uint8)
+    for si, sec in enumerate(payload["sections"]):
+        if sec is None:
+            continue
+        bn, bi = sec.get("biomes") or ([], None)
+        if not bn or bi is None:
+            continue
+        lut = np.zeros(len(bn), np.uint8)
+        for j, nm in enumerate(bn):
+            gid = bio_ids.get(nm)
+            if gid is None:
+                gid = len(bio_names) if len(bio_names) <= 255 else 0
+                if gid:
+                    bio_ids[nm] = gid
+                    bio_names.append(nm)
+            lut[j] = gid
+        g = lut[np.asarray(bi, np.uint8).reshape(4, 4, 4)]     # (4,4,4) [y,z,x]
+        out[si * 16:(si + 1) * 16] = np.repeat(
+            np.repeat(np.repeat(g, 4, axis=0), 4, axis=1), 4, axis=2)
+    return out
+
+
+def _palette_tints(palette, pack):
+    """-> (tints[n_pal][facegrp][rgb], kinds[n_pal][facegrp], need[n_pal])。
+
+    tints 是平原常量色（无群系数据时的兜底）；kinds 是染色类别（0 无 / 1 草 /
+    2 叶 / 3 水，供按群系取色）；need 表示该方块是否需要按群系拆分贪心合并。"""
+    n = len(palette)
+    tints = np.ones((n, 3, 3), np.float32)
+    kinds = np.zeros((n, 3), np.uint8)
+    need = np.zeros(n, bool)
+    for i, name in enumerate(palette):
+        mask = (pack.tint_mask(name)
+                if pack is not None and hasattr(pack, "tint_mask") else None)
+        k = B.tint_kind(name)
+        for fg in range(3):
+            if mask is None:
+                t = B.tint_of(name)
+            elif (mask >> fg) & 1:
+                t = B.default_tint(name)
+            else:
+                t = None
+            if t:
+                tints[i, fg] = t
+                kinds[i, fg] = k if k else B.TINT_KIND_GRASS
+                need[i] = True
+    return tints, kinds, need
+
+
+def biome_lut(pack, bio_names):
+    """群系查色表 (n_id, 4, 3) float32：id -> 类别(0 无/1 草/2 叶/3 水) -> rgb。
+
+    无群系数据（或资产包没有该群系）时该项保持全 1，即退回 tints 的常量色。"""
+    lut = np.ones((len(bio_names), 4, 3), np.float32)
+    if pack is None:
+        return lut
+    for i, name in enumerate(bio_names):
+        if not name:
+            continue
+        t = pack.biome_tint(name)
+        if t is None:
+            continue
+        for k in range(3):
+            lut[i, k + 1] = t[k]
+    return lut
 
 
 # ------------------------------------------------------------- 贪心合并 ----
@@ -128,8 +216,13 @@ def _corner_ao(occl):
 
 
 def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
-                palette=None, pack=None):
+                palette=None, pack=None, biome=None, bio_need=None):
     """返回 (quads, models)。
+
+    biome: 与 cls 同形状的群系 id padded 数组（assemble_padded(with_biome=True)
+           产出）；提供时群系维度进入贪心合并键，跨群系边界处拆四边形。
+    bio_need: 每 palette 项是否参与按群系拆分（mesh_padded 内部会用
+           _palette_tints 计算，也可由调用方传入避免重复计算）。
 
     quads: list[(verts int16 (4,3), dir u8, block u16, ao u8×4)]（完整方块面）。
     models: list[(verts int16 (4,3), dir, tex u16, tint i8, cull u8, uv f32(4,2),
@@ -161,6 +254,7 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
     for d in range(3):
         C = np.moveaxis(cls, d, 0)
         G = np.moveaxis(gid, d, 0)
+        Bm = np.moveaxis(biome, d, 0) if biome is not None else None
         if d == 1:
             # 长轴(y)顶部全空层裁剪：起点保持、plane 索引 i 语义不变，
             # 输出与未裁剪逐位一致（上方空层不产生任何面），省 ~40% numpy 张量运算
@@ -170,6 +264,8 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
                 cut = int(nnz[-1]) + 2             # 含 1 层边界 + 顶部边框
                 cut = max(2, min(cut, C.shape[0]))
                 C, G = np.ascontiguousarray(C[:cut]), np.ascontiguousarray(G[:cut])
+                if Bm is not None:
+                    Bm = np.ascontiguousarray(Bm[:cut])
         Ac, Bc = C[:-1], C[1:]           # cls 已是 uint8，切片即视图
         Aid, Bid = G[:-1], G[1:]
         for positive in (True, False):
@@ -201,6 +297,13 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
                 ao = None
                 sig = np.zeros(mask.shape, np.uint32)
             key = ((ids.astype(np.uint32) + 1) << 8) | sig
+            if Bm is not None:
+                # 群系维度进合并键（高 32 位）：只有"声明染色"的方块才参与拆分，
+                # 实测可把几何代价从 +6~9% 压到 +1.3~1.6%；id 0 = 未知，不拆。
+                bid = (Bm[:-1] if positive else Bm[1:]).astype(np.uint64)
+                if bio_need is not None:
+                    bid = np.where(bio_need[ids], bid, 0)
+                key = key.astype(np.uint64) | (bid << 32)
             key[~mask] = 0
             # 只发射"面所属格子"位于中心区块的面:
             #   +dir 面属于切片 i 的格子 -> i∈[1, n_d-2]（padded 0 是邻区块边框）
@@ -222,7 +325,7 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
                 kp = key[i]
                 for k in np.unique(kp[kp > 0]):
                     bm = (kp == k)
-                    blk = (int(k) >> 8) - 1
+                    blk = ((int(k) & 0xFFFFFFFF) >> 8) - 1   # 高 32 位是群系 id，需屏蔽
                     for (u0, v0, w, h) in _rects(bm):
                         _emit(quads, blk, i, u0, v0, w, h, d, positive,
                                ao, i_col=None, with_ao=with_ao)
@@ -380,7 +483,38 @@ def _emit_flat(quads, blk, p, u0, v0, w, h, d, positive):
 
 # ------------------------------------------------------- 几何装配(BI 数据) ----
 
-def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None):
+def _quad_cells(verts, dirs):
+    """每面所属格子的 padded 坐标 (nq,3) int32。
+
+    法向轴：正向面取平面索引，负向面取平面索引 + 1；u/v 轴取矩形起点
+    （群系已进合并键，矩形内群系必然一致，取任一点等价）。"""
+    nq = verts.shape[0]
+    iv = np.asarray(verts, np.int32)
+    d = np.asarray(dirs, np.int32) // 2
+    neg = (np.asarray(dirs, np.int32) % 2).astype(np.int32)
+    cell = np.empty((nq, 3), np.int32)
+    for ax in range(3):
+        m = (d == ax)
+        if m.any():
+            cell[m, ax] = iv[m, 0, ax] + neg[m]
+        mu = ~m
+        if mu.any():
+            cell[mu, ax] = iv[mu][:, :, ax].min(axis=1)
+    return cell
+
+
+def _model_cells(verts16):
+    """烘焙模型面（中心区块局部坐标、1/16 方块单位）-> padded 格子坐标 (nq,3)。
+
+    取面的中心落在哪个局部格。**必须用 ceil 而不是 floor**：草方块 ±x/±z 侧面
+    的 4 个顶点全落在格边界上（如 x=16），floor 会把它算到隔壁格 —— 同群系内
+    看不出差异，跨群系边界时会整体错开 1 格。"""
+    c = np.asarray(verts16, np.float32).mean(axis=1) / 16.0
+    return np.clip(np.ceil(c).astype(np.int32), 1, 16)
+
+
+def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
+                    biome=None):
     """完整方块数组 + 可选烘焙模型 -> 导入器几何字典。
 
     mats 为材质描述符列表:
@@ -408,7 +542,8 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None):
         mz = (d == 2)
         uv[mz] = vf[mz][:, :, [0, 1]]
 
-        # vcol: tint * AO。资产包声明染色面时按面组分别染色，否则沿用方块整体染色。
+        # vcol: tint * AO。资产包声明染色面时按面组分别染色，否则沿用方块整体染色；
+        # biome=(padded群系id, 查色表) 时改用该面所属格子的群系颜色。
         shade = np.take(np.array(AO_CURVE, np.float32), aos)      # (nq,4)
         facegrp = np.where(dirs == 2, 0, np.where(dirs == 3, 1, 2)).astype(np.uint8)
         if pack is None:
@@ -417,19 +552,14 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None):
                 pack = assets.current()
             except Exception:
                 pack = None
-        tints = np.ones((len(palette), 3, 3), np.float32)         # [pal][facegrp][rgb]
-        for i, name in enumerate(palette):
-            mask = pack.tint_mask(name) if pack is not None else None
-            for fg in range(3):
-                if mask is None:
-                    t = B.tint_of(name)
-                elif (mask >> fg) & 1:
-                    t = B.default_tint(name)
-                else:
-                    t = None
-                if t:
-                    tints[i, fg] = t
-        rgb = tints[blocks_, facegrp]                             # (nq,3)
+        tints, kinds, _need = _palette_tints(palette, pack)
+        if biome is None:
+            rgb = tints[blocks_, facegrp]                         # (nq,3)
+        else:
+            pids, bio_lut = biome
+            cells = _quad_cells(vf, dirs)
+            rgb = bio_lut[pids[cells[:, 0], cells[:, 1], cells[:, 2]],
+                          kinds[blocks_, facegrp]]
         vcol = np.empty((nq, 4, 4), np.uint8)
         vcol[:, :, :3] = np.clip(rgb[:, None, :] * shade[:, :, None] * 255.0,
                                  0, 255).astype(np.uint8)
@@ -453,9 +583,19 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None):
         mtint = np.array([m[3] for m in models], np.int8)
         mblk = np.array([m[6] for m in models], np.uint16)
         mcol = np.ones((nm, 3), np.float32)
+        mkind = np.zeros(nm, np.uint8)
         for i, ti in enumerate(mtint):
             if ti >= 0:
-                mcol[i] = B.default_tint(palette[mblk[i]])
+                bname = palette[mblk[i]]
+                mcol[i] = B.default_tint(bname)
+                mkind[i] = B.tint_kind(bname) or B.TINT_KIND_GRASS
+        if biome is not None and mkind.any():
+            pids, bio_lut = biome
+            mverts = np.array([m[0] for m in models], np.float32).reshape(-1, 4, 3)
+            mcell = _model_cells(mverts)
+            msel = mkind > 0
+            mcol[msel] = bio_lut[pids[mcell[msel, 0], mcell[msel, 1],
+                                      mcell[msel, 2]], mkind[msel]]
         vcol = np.empty((nm, 4, 4), np.uint8)
         vcol[:, :, :3] = np.clip(mcol[:, None, :] * mshade[:, :, None] * 255.0,
                                  0, 255).astype(np.uint8)
@@ -706,19 +846,35 @@ def mesh_payload(payloads, group=1, with_ao=True, leaves_fast=False,
                  pack=None, fluids=False):
     """(group+2)×(group+2) payload 字典 -> (quads, palette, y_bottom, models)。
 
+    兼容旧签名的包装；需要群系染色信息（R8）时用 mesh_payload_biome。"""
+    quads, pal, yb, models, _bio = mesh_payload_biome(
+        payloads, group=group, with_ao=with_ao, leaves_fast=leaves_fast,
+        pack=pack, fluids=fluids)
+    return quads, pal, yb, models
+
+
+def mesh_payload_biome(payloads, group=1, with_ao=True, leaves_fast=False,
+                       pack=None, fluids=False):
+    """(group+2)×(group+2) payload 字典 -> (quads, palette, y_bottom, models, biome)。
+
     group = 区块组边长：键 (dx,dz) ∈ [-1, group]，内圈 [0, group-1] 是组本体，
     外圈一格作剔除面用。group>1 时贪心矩形可跨区块边界合并（对象数按 group² 下降）。
+
+    biome = (padded 群系 id, 查色表)，直接交给 geo_from_arrays 按格取色（R8）。
 
     fluids=True 时把液体的整方块面换成类原版流体几何（见上），并剔除资产包为
     液体注入的整方块烘焙模型（use_model 只表示"模型不是简单整立方体"、与
     class 无关，水/岩浆同样会命中），否则整方块与流体几何会在同一格重叠。"""
-    cls, gid, H, pal = assemble_padded(payloads, group)
+    cls, gid, H, pal, bio, bio_names = assemble_padded(payloads, group,
+                                                       with_biome=True)
     # 交叉面片: CUTOUT 且非树叶（与 Java 侧 BlockClassifier 规则一致）
     cross = np.zeros(len(pal), bool)
     for i, (c, name) in enumerate(pal):
         cross[i] = (c == B.CUTOUT) and ("leaves" not in name)
+    _tints, _kinds, need = _palette_tints([n for _c, n in pal], pack)
     quads, models = mesh_padded(cls, gid, with_ao=with_ao, leaves_fast=leaves_fast,
-                                cross=cross, palette=pal, pack=pack)
+                                cross=cross, palette=pal, pack=pack,
+                                biome=bio, bio_need=need)
     if fluids:
         liq_ids = {i for i, (c, _) in enumerate(pal) if c == B.LIQUID}
         if liq_ids:
@@ -727,7 +883,7 @@ def mesh_payload(payloads, group=1, with_ao=True, leaves_fast=False,
             # 简单整立方体，与 class 无关）——必须一并剔除，否则与流体几何重叠
             models = [m for m in models if int(m[6]) not in liq_ids]
             quads.extend(_fluid_quads(cls, gid, pal))
-    return quads, pal, None, models
+    return quads, pal, None, models, (bio, biome_lut(pack, bio_names))
 
 
 def shell_payload(payloads, center=(0, 0)):

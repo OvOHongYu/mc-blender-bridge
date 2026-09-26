@@ -671,9 +671,9 @@ class TestSubPixelModels(unittest.TestCase):
         self.assertEqual(len(vi), 1)
         return self.pack.variants[vi[0]]
 
-    def test_round_trip_is_v5(self):
+    def test_round_trip_is_v6(self):
         with open(self.mcba, "rb") as f:
-            self.assertEqual(f.read(6), b"MCBA1\x05")
+            self.assertEqual(f.read(6), b"MCBA1\x06")
 
     def test_fractional_coords_survive(self):
         quads = self._quads()

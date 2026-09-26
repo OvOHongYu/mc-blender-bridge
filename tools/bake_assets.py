@@ -72,8 +72,9 @@ except ImportError:                                  # pragma: no cover
     Image = None
 
 MAGIC = b"MCBA1"
-VERSION = 5                    # v1: 顶点 1/16；v2: 1/256（亚像素）；v3: 变体级方块信息；
-                               # v4: 画变体表；v5: 实体模型段（分层，运行时装配）
+VERSION = 6                    # v1: 顶点 1/16；v2: 1/256（亚像素）；v3: 变体级方块信息；
+                               # v4: 画变体表；v5: 实体模型段（分层，运行时装配）；
+                               # v6: 群系染色表（biome -> grass/foliage/water RGB）
 _VERT_SCALE = 16               # v2 写入倍数：1/16 单位 × 16 = 1/256 方块单位
 _I16_MIN, _I16_MAX = -32768, 32767
 
@@ -1035,6 +1036,85 @@ def proxy_model(block, particle):
     return None
 
 
+# ------------------------------------------------------------ 群系染色 ----
+
+def _biome_colormap(pack, name):
+    """colormap png -> (w, h, pixel)；缺失返回 None。"""
+    raw = pack.read("assets/minecraft/textures/colormap/%s.png" % name)
+    if raw is None:
+        return None
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    return img.size[0], img.size[1], img.load()
+
+
+def _cm_color(cm, t, d):
+    """等价原版 GrassColors/FoliageColors.getColor(temperature, downfall)。
+
+    取自 1.21.1 字节码:
+      i = (int)((1 - t) * 255); j = (int)((1 - d * t) * 255); k = (j << 8) | i
+      return k < 65536 ? colorMap[k] : 0xFF00FF
+    colorMap 按 png 行主序填充（colorMap[y * 256 + x] = ARGB(png(x, y))）。
+    """
+    if cm is None:
+        return None
+    w, h, px = cm
+    i = int((1.0 - t) * 255.0)
+    j = int((1.0 - d * t) * 255.0)
+    k = (j << 8) | i
+    if k < 0 or k >= w * h:
+        return 0xFF00FF
+    y, x = divmod(k, w)
+    r, g, b = px[x, y]
+    return (r << 16) | (g << 8) | b
+
+
+def build_biome_colors(pack):
+    """烘焙「群系 -> (grass, foliage, water) 0xRRGGBB」。
+
+    取值路径按原版 Biome 的字节码，不做近似推理:
+      grass   = effects.grass_color，否则 colormap(clamp(t), clamp(d))，
+                再按 effects.grass_color_modifier 修正（SWAMP / DARK_FOREST）
+      foliage = effects.foliage_color，否则 colormap(clamp(t), clamp(d))
+      water   = effects.water_color（不走 colormap；原版默认 4159204）
+    """
+    grass_cm = _biome_colormap(pack, "grass")
+    fol_cm = _biome_colormap(pack, "foliage")
+    prefix = "data/minecraft/worldgen/biome/"
+    out = {}
+    for name in sorted(pack.names()):
+        if not name.startswith(prefix) or not name.endswith(".json"):
+            continue
+        try:
+            b = pack.json(name)
+        except Exception:
+            continue
+        bid = "minecraft:" + name[len(prefix):-5]
+        eff = b.get("effects") or {}
+        t = min(1.0, max(0.0, float(b.get("temperature", 0.5))))
+        d = min(1.0, max(0.0, float(b.get("downfall", 0.5))))
+        g = eff.get("grass_color")
+        if g is None:
+            g = _cm_color(grass_cm, t, d)
+            if g is None:
+                g = 0x91BD59                    # 无 colormap 时退回平原色
+        mod = str(eff.get("grass_color_modifier") or "").lower()
+        if mod == "dark_forest":
+            # 原版: ((c & 0xFEFEFE) + 0x28340A) >> 1
+            g = ((int(g) & 0xFEFEFE) + 0x28340A) >> 1
+        elif mod == "swamp":
+            # 原版: OctaveSimplexNoise(x*0.0225, z*0.0225) < -0.1 ? 5011004 : 6975545
+            # 噪声需按坐标采样，此处取后者（#6A7039，沼泽黄绿）
+            g = 6975545
+        f = eff.get("foliage_color")
+        if f is None:
+            f = _cm_color(fol_cm, t, d)
+            if f is None:
+                f = 0x77AB2F
+        wc = eff.get("water_color", 4159204)
+        out[bid] = (int(g) & 0xFFFFFF, int(f) & 0xFFFFFF, int(wc) & 0xFFFFFF)
+    return out
+
+
 class Baker:
     def __init__(self, pack, mc_version, only=None, overrides=None):
         self.pack = pack
@@ -1053,6 +1133,7 @@ class Baker:
         self.block_tex = []          # (block, top, side, bottom)
         self.paintings = []          # (name, w, h, tex)（v4 画变体表）
         self.entity_models = {}      # name -> {"texW","texH","tex","parts"}（v5）
+        self.biome_colors = {}       # biome -> (grass, foliage, water) 0xRRGGBB（v6）
 
     # -------------------------------------------------- 贴图 ----
     def _ensure_texture(self, name, strip=True):
@@ -1536,6 +1617,7 @@ class Baker:
         self._preload_textures()
         self.paintings = self.bake_paintings()
         self._load_entity_models()
+        self.biome_colors = build_biome_colors(self.pack)
         blocks = []
         for n in sorted(self.pack.names()):
             parts = n.split("/")
@@ -1610,6 +1692,11 @@ class Baker:
         for name, model in self.entity_models.items():
             blob = json.dumps(model, separators=(",", ":")).encode("utf-8")
             out.append(_pstr(name) + struct.pack("<I", len(blob)) + blob)
+        # 群系染色表（v6）：name | grass u32 | foliage u32 | water u32（均 0xRRGGBB）
+        out.append(struct.pack("<I", len(self.biome_colors)))
+        for name in sorted(self.biome_colors):
+            g, f, wc = self.biome_colors[name]
+            out.append(_pstr(name) + struct.pack("<III", g, f, wc))
         data = b"".join(out)
         with open(path, "wb") as f:
             f.write(data)
