@@ -42,7 +42,6 @@ def connect_save(p):
         return False, "打开存档失败: %s" % e
     scheduler = Scheduler(client, Params(
         dim=dim, r_load=p.r_load, r_unload=p.r_unload,
-        lod1_dist=p.lod1_dist, lod2_dist=p.lod2_dist,
         ymin=p.ymin, ymax=p.ymax, mode="raw",
         leaves_fast=(p.leaves == "fast"), group=int(p.group),
         inflight=p.inflight,

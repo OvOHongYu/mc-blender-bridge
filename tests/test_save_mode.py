@@ -488,8 +488,8 @@ class TestSaveScheduler(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _scheduler(self, **kw):
-        base = dict(dim="minecraft:overworld", r_load=1, r_unload=2, lod1_dist=2,
-                    lod2_dist=3, ymin=-64, ymax=320, inflight=2, mode="raw")
+        base = dict(dim="minecraft:overworld", r_load=1, r_unload=2,
+                    ymin=-64, ymax=320, inflight=2, mode="raw")
         base.update(kw)
         world = self.AnvilWorld(self.world_dir)
         client = self.SaveClient(world)
@@ -622,7 +622,6 @@ class TestSaveModeAddon(unittest.TestCase):
         p.save_dir = self.world_dir
         p.dim = "minecraft:overworld"
         p.r_load, p.r_unload = 1, 2
-        p.lod1_dist, p.lod2_dist = 2, 3
         p.ymin, p.ymax = -64, 320
         p.inflight = 2
         p.apply_per_tick, p.evict_per_tick = 8, 32

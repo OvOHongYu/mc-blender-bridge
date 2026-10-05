@@ -198,22 +198,42 @@ def biome_lut(pack, bio_names):
 # ------------------------------------------------------------- 贪心合并 ----
 
 def _rects(bm):
-    """bm: 2D bool 数组（行=u）。产出 (u0, v0, w, h) 矩形覆盖，行主序扫描。"""
+    """bm: 2D bool 数组（行=u）。产出 (u0, v0, w, h) 矩形覆盖，行主序扫描。
+
+    与旧实现产出完全一致（发现顺序、矩形分解都相同）。行按位掩码存进
+    Python 整数、用位运算提取：每矩形从"若干次 numpy 微操作"（每次 ~1µs
+    调用延迟）变成纯整数运算，微矩形（AO/群系拆分产生的碎矩形）受益最大。"""
     n_u, n_v = bm.shape
+    packed = np.packbits(bm, axis=1, bitorder="little")
+    rows = [int.from_bytes(packed[u].tobytes(), "little") for u in range(n_u)]
     out = []
-    while bm.any():
-        rows = np.nonzero(bm.any(axis=1))[0]
-        u0 = int(rows[0])
-        v0 = int(np.argmax(bm[u0]))
+    while True:
+        u0 = -1
+        for u in range(n_u):
+            if rows[u]:
+                u0 = u
+                break
+        if u0 < 0:
+            return out
+        r0 = rows[u0]
+        v0 = (r0 & -r0).bit_length() - 1          # 该行第一个 True 列
         w = 1
-        while u0 + w < n_u and bm[u0 + w, v0]:
+        while u0 + w < n_u and (rows[u0 + w] >> v0) & 1:
             w += 1
         h = 1
-        while v0 + h < n_v and bm[u0:u0 + w, v0 + h].all():
+        while v0 + h < n_v:
+            ok = True
+            for k in range(w):
+                if not (rows[u0 + k] >> (v0 + h)) & 1:
+                    ok = False
+                    break
+            if not ok:
+                break
             h += 1
-        bm[u0:u0 + w, v0:v0 + h] = False
+        clear = ~(((1 << h) - 1) << v0)
+        for k in range(w):
+            rows[u0 + k] &= clear
         out.append((u0, v0, w, h))
-    return out
 
 
 def _corner_ao(occl):
@@ -280,21 +300,20 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
             if _overlay_of(pack, name) is not None:
                 continue
             modeled[gi] = [q for vi in vis for q in pack.variants[vi]]
+    # 顶部空层裁剪（一次，三个方向都受益）：起点保持、plane 索引语义不变，
+    # 输出与未裁剪逐位一致（上方空层不产生任何面），省 ~40% numpy 张量运算
+    occ_y = (cls != 0).any(axis=(0, 2))
+    nnz_y = np.nonzero(occ_y)[0]
+    if nnz_y.size and int(nnz_y[-1]) + 2 < cls.shape[1]:
+        cut = max(2, min(int(nnz_y[-1]) + 2, cls.shape[1]))
+        cls = np.ascontiguousarray(cls[:, :cut, :])
+        gid = np.ascontiguousarray(gid[:, :cut, :])
+        if biome is not None:
+            biome = np.ascontiguousarray(biome[:, :cut, :])
     for d in range(3):
         C = np.moveaxis(cls, d, 0)
         G = np.moveaxis(gid, d, 0)
         Bm = np.moveaxis(biome, d, 0) if biome is not None else None
-        if d == 1:
-            # 长轴(y)顶部全空层裁剪：起点保持、plane 索引 i 语义不变，
-            # 输出与未裁剪逐位一致（上方空层不产生任何面），省 ~40% numpy 张量运算
-            occ = (C != 0).any(axis=(1, 2))
-            nnz = np.nonzero(occ)[0]
-            if nnz.size:
-                cut = int(nnz[-1]) + 2             # 含 1 层边界 + 顶部边框
-                cut = max(2, min(cut, C.shape[0]))
-                C, G = np.ascontiguousarray(C[:cut]), np.ascontiguousarray(G[:cut])
-                if Bm is not None:
-                    Bm = np.ascontiguousarray(Bm[:cut])
         Ac, Bc = C[:-1], C[1:]           # cls 已是 uint8，切片即视图
         Aid, Bid = G[:-1], G[1:]
         for positive in (True, False):
@@ -352,12 +371,33 @@ def mesh_padded(cls, gid, with_ao=True, leaves_fast=False, cross=None,
             # 顺序不变，省 ~30ms/区块）
             for i in np.nonzero(key.any(axis=(1, 2)))[0]:
                 kp = key[i]
-                for k in np.unique(kp[kp > 0]):
-                    bm = (kp == k)
+                # 每层按键分组（向量化），只在**该键格子的包围盒**内提矩形：
+                # 消掉旧实现"每个键做一次全平面比较"的 O(键数×平面) 开销。
+                # 与旧实现同结果同顺序（键升序、_rects 行主序发现序），矩形
+                # 分解逐位一致 —— A/B 对拍与 Java 夹具依赖这一点。
+                flat = kp.ravel()
+                cells = np.nonzero(flat)[0]
+                if cells.size == 0:
+                    continue
+                uk, inv = np.unique(flat[cells], return_inverse=True)
+                order = np.argsort(inv, kind="stable")
+                cells = cells[order]
+                inv = inv[order]
+                bounds = np.nonzero(np.diff(inv))[0] + 1
+                starts = np.concatenate(([0], bounds))
+                ends = np.concatenate((bounds, [inv.size]))
+                us_all, vs_all = np.unravel_index(cells, kp.shape)
+                for s, e, k in zip(starts, ends, uk):
+                    us = us_all[s:e]
+                    vs = vs_all[s:e]
+                    u0b, v0b = int(us.min()), int(vs.min())
+                    bm = np.zeros((int(us.max()) - u0b + 1,
+                                   int(vs.max()) - v0b + 1), bool)
+                    bm[us - u0b, vs - v0b] = True
                     blk = ((int(k) & 0xFFFFFFFF) >> 8) - 1   # 高 32 位是群系 id，需屏蔽
                     for (u0, v0, w, h) in _rects(bm):
-                        _emit(quads, blk, i, u0, v0, w, h, d, positive,
-                               ao, i_col=None, with_ao=with_ao)
+                        _emit(quads, blk, i, u0 + u0b, v0 + v0b, w, h, d, positive,
+                              ao, i_col=None, with_ao=with_ao)
 
     # 交叉面片植物（CUTOUT 非树叶）：对角两个面片，dir=0(+X)->side 贴图
     if cross is not None:
@@ -785,19 +825,12 @@ def _fluid_quads(cls, gid, palette):
 
     cls/gid 是 assemble_padded 的填充数组（y 维 = 区块层数 + 2 层边框，
     x/z 维 = 16*组边长 + 2），因此层数 = shape[1] - 2，方块格位于 [1, E) ×
-    [1, H+1) × [1, E)，E = shape[0] - 1。"""
-    H = cls.shape[1] - 2
-    E = cls.shape[0] - 1
-    # 顶部空层裁剪：与 mesh_padded 一致。若不裁，下面的向量运算会在**整段
-    # 高度**（默认 384 层）上跑，而方块实体往往只占十几层 —— 实测一个只有 3 个
-    # 液体格的体积也要 138ms，几乎全是白算。只裁顶部，索引语义不变。
-    occ_y = (cls != 0).any(axis=(0, 2))
-    nnz_y = np.nonzero(occ_y)[0]
-    if nnz_y.size and int(nnz_y[-1]) + 2 < cls.shape[1]:
-        cut = max(2, int(nnz_y[-1]) + 2)
-        cls = np.ascontiguousarray(cls[:, :cut, :])
-        gid = np.ascontiguousarray(gid[:, :cut, :])
-        H = cls.shape[1] - 2
+    [1, H+1) × [1, E)，E = shape[0] - 1。
+
+    只在「液体格 ±1」的包围盒内计算：角高度只依赖 ±1 邻居，包围盒外的格子
+    不产生任何液体面 —— 输出与全量计算逐位一致（发射时加回包围盒偏移）。
+    全量计算在"内容顶到 ymax 的体积"上要 ~20 次全盒向量运算（实测 130ms），
+    而液体往往只有几十格。"""
     n = len(palette)
     is_liq = np.zeros(n, bool)
     is_solid = np.zeros(n, bool)
@@ -813,9 +846,23 @@ def _fluid_quads(cls, gid, palette):
             base_of[b] = len(base_of)
         base_id[i] = base_of[b]
 
-    liq = is_liq[gid]
-    if not liq.any():
+    liq_all = is_liq[gid]
+    if not liq_all.any():
         return []
+    idx = np.argwhere(liq_all)
+    x0 = max(int(idx[:, 0].min()) - 1, 0)
+    x1 = min(int(idx[:, 0].max()) + 2, cls.shape[0])
+    y0 = max(int(idx[:, 1].min()) - 1, 0)
+    y1 = min(int(idx[:, 1].max()) + 2, cls.shape[1])
+    z0 = max(int(idx[:, 2].min()) - 1, 0)
+    z1 = min(int(idx[:, 2].max()) + 2, cls.shape[2])
+    cls = np.ascontiguousarray(cls[x0:x1, y0:y1, z0:z1])
+    gid = np.ascontiguousarray(gid[x0:x1, y0:y1, z0:z1])
+
+    H = cls.shape[1] - 2
+    XE = cls.shape[0] - 1          # x 轴中心区上界（包围盒内 x/z 不一定等长）
+    ZE = cls.shape[2] - 1
+    liq = is_liq[gid]
     bid = base_id[gid]
     sol = is_solid[gid]
     above_same = np.zeros_like(liq)
@@ -824,9 +871,9 @@ def _fluid_quads(cls, gid, palette):
     h = np.where(liq, np.where(above_same, 1.0, frac[gid]),
                  np.where(sol, -1.0, 0.0)).astype(np.float32)
 
-    own = h[1:E, 1:H + 1, 1:E]
-    liq_c = liq[1:E, 1:H + 1, 1:E]
-    bid_c = bid[1:E, 1:H + 1, 1:E]
+    own = h[1:XE, 1:H + 1, 1:ZE]
+    liq_c = liq[1:XE, 1:H + 1, 1:ZE]
+    bid_c = bid[1:XE, 1:H + 1, 1:ZE]
 
     def _nb(sx, sz):
         """邻居列高度。
@@ -834,7 +881,7 @@ def _fluid_quads(cls, gid, palette):
         原版邻居高度 = getFluidHeight(world, **当前渲染的流体**, 邻居pos)：邻居必须是
         「与当前渲染流体同种」才按流体高度计入，否则走 solid ? -1 : 0 —— 水/岩浆相邻时
         彼此按 0 处理，不能直接借用邻居自己的列高度。"""
-        sl = (slice(1 + sx, E + sx), slice(1, H + 1), slice(1 + sz, E + sz))
+        sl = (slice(1 + sx, XE + sx), slice(1, H + 1), slice(1 + sz, ZE + sz))
         return np.where(liq[sl] & (bid[sl] != bid_c), 0.0, h[sl])
 
     corners = {}
@@ -872,9 +919,9 @@ def _fluid_quads(cls, gid, palette):
                 float(corners[(1, 1)][i, j, k]), float(corners[(1, -1)][i, j, k]))
 
     # 顶面：上方不是同种流体且未被不透明方块遮挡
-    top = liq_c & ~above_same[1:E, 1:H + 1, 1:E] & ~opa[1:E, 2:H + 2, 1:E]
+    top = liq_c & ~above_same[1:XE, 1:H + 1, 1:ZE] & ~opa[1:XE, 2:H + 2, 1:ZE]
     for i, j, k in zip(*np.nonzero(top)):
-        X, Y, Z = int(i), int(j), int(k)
+        X, Y, Z = int(i) + x0, int(j) + y0, int(k) + z0   # 加回包围盒偏移
         c00, c01, c11, c10 = _corners(i, j, k)
         out.append((((X, Y + c00, Z), (X, Y + c01, Z + 1),
                      (X + 1, Y + c11, Z + 1), (X + 1, Y + c10, Z)),
@@ -884,19 +931,19 @@ def _fluid_quads(cls, gid, palette):
     below_same = np.zeros_like(liq)
     below_same[:, 1:, :] = (liq[:, :-1, :] & liq[:, 1:, :]
                             & (bid[:, :-1, :] == bid[:, 1:, :]))
-    bot = liq_c & ~below_same[1:E, 1:H + 1, 1:E] & ~opa[1:E, 0:H, 1:E]
+    bot = liq_c & ~below_same[1:XE, 1:H + 1, 1:ZE] & ~opa[1:XE, 0:H, 1:ZE]
     for i, j, k in zip(*np.nonzero(bot)):
-        X, Y, Z = int(i), int(j), int(k)
+        X, Y, Z = int(i) + x0, int(j) + y0, int(k) + z0   # 加回包围盒偏移
         out.append((((X, Y, Z), (X + 1, Y, Z), (X + 1, Y, Z + 1), (X, Y, Z + 1)),
                     3, _blk(i, j, k), (3, 3, 3, 3)))
 
     # 四个侧面：邻居不是同种流体且未被遮挡（顶边沿该侧两个角高度）
     for sx, sz in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        nb = (slice(1 + sx, E + sx), slice(1, H + 1), slice(1 + sz, E + sz))
-        nb_same = liq[nb] & (bid[nb] == bid[1:E, 1:H + 1, 1:E])
+        nb = (slice(1 + sx, XE + sx), slice(1, H + 1), slice(1 + sz, ZE + sz))
+        nb_same = liq[nb] & (bid[nb] == bid[1:XE, 1:H + 1, 1:ZE])
         mask = liq_c & ~nb_same & ~opa[nb]
         for i, j, k in zip(*np.nonzero(mask)):
-            X, Y, Z = int(i), int(j), int(k)
+            X, Y, Z = int(i) + x0, int(j) + y0, int(k) + z0   # 加回包围盒偏移
             c00, c01, c11, c10 = _corners(i, j, k)
             if sx < 0:
                 v = ((X, Y, Z), (X, Y, Z + 1), (X, Y + c01, Z + 1), (X, Y + c00, Z))

@@ -28,12 +28,10 @@ class Params:
         self.dim = kw.get("dim", "overworld")
         self.r_load = kw.get("r_load", 8)            # 加载半径（区块，欧氏）
         self.r_unload = kw.get("r_unload", 11)       # 卸载半径（迟滞带 = r_unload - r_load）
-        self.lod1_dist = kw.get("lod1_dist", 6)      # >= 此距离用 LOD1（关 AO）
-        self.lod2_dist = kw.get("lod2_dist", 10)     # >= 此距离用 LOD2（壳网格）
         self.ymin = kw.get("ymin", -64)
         self.ymax = kw.get("ymax", 320)
         self.mode = kw.get("mode", "mesh")           # mesh=模式B / raw=模式A
-        self.use_models = kw.get("use_models", True)  # LOD0 用资产包烘焙模型
+        self.use_models = kw.get("use_models", True)  # 用资产包烘焙模型（本地网格）
         self.biome_tint = kw.get("biome_tint", True)  # 按群系调色（R8）
         self.leaves_fast = kw.get("leaves_fast", False)
         self.group = int(kw.get("group", 2))         # 区块组边长（1/2/4，R4 跨区块合并）
@@ -44,7 +42,6 @@ class Params:
 
     def as_dict(self):
         return dict(dim=self.dim, r_load=self.r_load, r_unload=self.r_unload,
-                    lod1_dist=self.lod1_dist, lod2_dist=self.lod2_dist,
                     ymin=self.ymin, ymax=self.ymax, mode=self.mode,
                     leaves_fast=self.leaves_fast, group=self.group,
                     inflight=self.inflight)
@@ -168,13 +165,6 @@ class Scheduler:
         dz = max(gz - acz, acz - (gz + g - 1), 0)
         return math.hypot(dx, dz)
 
-    def _desired_lod(self, dist):
-        if dist >= self.p.lod2_dist:
-            return 2
-        if dist >= self.p.lod1_dist:
-            return 1
-        return 0
-
     # ------------------------------------------------------------ 主循环 ----
     def tick(self):
         """主线程定期调用：计算需求集、入队缺失、标记卸载。"""
@@ -190,17 +180,10 @@ class Scheduler:
             for (gx, gz) in need:
                 key = (self.p.dim, gx, gz)
                 d = self._group_dist(gx, gz)
-                st = self.state.get(key)
-                want_lod = self._desired_lod(d)
-                if st is None:
-                    self.state[key] = {"status": QUEUED, "lod": want_lod,
+                if key not in self.state:
+                    self.state[key] = {"status": QUEUED,
                                        "gen": 0, "last_seen": self.time(),
                                        "version": None}
-                    self._push(d, key)
-                elif st["status"] == LIVE and st["lod"] != want_lod:
-                    st["status"] = QUEUED
-                    st["lod"] = want_lod
-                    st["gen"] += 1
                     self._push(d, key)
             # 2. 迟滞卸载
             if not self.frozen:
@@ -234,21 +217,20 @@ class Scheduler:
                 st["status"] = FETCHING
                 self.inflight_keys.add(key)
                 gen = st["gen"]
-                lod = st["lod"]
-                self.executor.submit(self._fetch, key, lod, gen)
+                self.executor.submit(self._fetch, key, gen)
                 dispatched += 1
         return dispatched
 
-    def _fetch(self, key, lod, gen):
+    def _fetch(self, key, gen):
         dim, gx, gz = key
         try:
-            payload = self._fetch_geo(dim, gx, gz, lod)
+            payload = self._fetch_geo(dim, gx, gz)
             with self.lock:
                 st = self.state.get(key)
                 self.inflight_keys.discard(key)
                 if st is None or st["gen"] != gen:
                     return  # 已过期（被重新入队或卸载）
-                self.ready.append((key, {"lod": lod, "geo": payload,
+                self.ready.append((key, {"geo": payload,
                                          "yBottom": self.p.ymin}))
                 st["status"] = READY
         except Exception as e:
@@ -263,26 +245,24 @@ class Scheduler:
                 self.stats["last_error"] = f"{key}: {e}"
             self.log("fetch error", key, e)
 
-    def _fetch_geo(self, dim, gx, gz, lod):
-        # LOD0/1 且已加载资产包时走本地网格：本地路径能注入烘焙模型（近处楼梯/
-        # 栅栏/模组装饰需要真实形状），而控制模式的"服务端网格"在 Java 侧、
-        # 没有资产包，非整方块只能近似成带贴图的整方块（存档模式的 LOD1 在
-        # Blender 侧网格化、一直有模型 —— 两种模式观感必须一致）。
-        # LOD2（及未开模型时的 LOD1）仍用服务端网格保吞吐：壳网格只是高度场，
-        # 远处的装饰形状不重要。两条路径都按整组产出（R4）。
-        if lod < 2 and (self.p.mode == "raw"
-                        or (lod <= 1 and self._models_on())):
-            geo = self._fetch_geo_local(dim, gx, gz, lod)
+    def _fetch_geo(self, dim, gx, gz):
+        # 已加载资产包（或 raw 模式）时走本地网格：本地路径能注入烘焙模型
+        # （楼梯/栅栏/模组装饰的真实形状），且控制模式的"服务端网格"在 Java 侧
+        # 没有资产包，非整方块只能近似成带贴图的整方块。未开模型时用服务端
+        # 网格保吞吐。两条路径都按整组产出：本地路径在组内跨区块贪心合并，
+        # 服务端路径把组内各区块网格拼成一个对象（R4）。
+        if self.p.mode == "raw" or self._models_on():
+            geo = self._fetch_geo_local(dim, gx, gz)
         else:
-            geo = self._fetch_geo_server(dim, gx, gz, lod)
-        ent = self._entity_geo(dim, gx, gz, lod)
+            geo = self._fetch_geo_server(dim, gx, gz)
+        ent = self._entity_geo(dim, gx, gz)
         if ent is None:
             return geo
         return mesher.merge_geos([geo, ent], [(0.0, 0.0, 0.0)] * 2)
 
-    def _entity_geo(self, dim, gx, gz, lod):
-        """区块组内实体（目前只有画）的几何；远处 LOD 与无实体的数据源直接跳过。"""
-        if lod > 0 or not self.has_entities:
+    def _entity_geo(self, dim, gx, gz):
+        """区块组内实体（目前只有画）的几何；无实体的数据源直接跳过。"""
+        if not self.has_entities:
             return None
         from . import assets, entities
         pack = assets.current()
@@ -314,7 +294,7 @@ class Scheduler:
         g = self.p.group
         return [(dx, dz) for dx in range(-1, g + 1) for dz in range(-1, g + 1)]
 
-    def _fetch_geo_local(self, dim, gx, gz, lod):
+    def _fetch_geo_local(self, dim, gx, gz):
         """组 + 外圈一格 -> 一个填充体积 -> 一次网格化（贪心可跨区块）。"""
         g = self.p.group
         payloads = {}
@@ -325,7 +305,7 @@ class Scheduler:
                     k[0], k[1], k[2], self.p.ymin, self.p.ymax))
         from . import assets
         quads, pal, _, models, bio = mesher.mesh_payload_biome(
-            payloads, group=g, with_ao=(lod == 0), leaves_fast=self.p.leaves_fast,
+            payloads, group=g, with_ao=True, leaves_fast=self.p.leaves_fast,
             pack=assets.current(), fluids=True, biome=self.p.biome_tint)
         import numpy as np
         # 流体几何顶点是小数块坐标 -> 用 float32（整型会截断水面高度）
@@ -338,7 +318,7 @@ class Scheduler:
         return geo_from_arrays(verts, dirs, blks, aos, [n for _, n in pal],
                                models=models, pack=assets.current(), biome=bio)
 
-    def _fetch_geo_server(self, dim, gx, gz, lod):
+    def _fetch_geo_server(self, dim, gx, gz):
         """组内逐区块取服务端网格，平移到组局部坐标后拼成一个 geo。
 
         区块网格顶点是"区块局部块坐标、y 相对该区块的 yBottom"，组内各区块
@@ -356,7 +336,7 @@ class Scheduler:
             kw = ({"biome": self.p.biome_tint}
                   if getattr(self.client, "world", None) is not None else {})
             m = self.client.mesh(dim, gx + dx, gz + dz, self.p.ymin, self.p.ymax,
-                                 lod=lod, ao=(lod == 0),
+                                 lod=0, ao=True,
                                  leaves=("fast" if self.p.leaves_fast else "fancy"),
                                  **kw)
             bio = m.get("biome") if self.p.biome_tint else None
@@ -461,7 +441,7 @@ class Scheduler:
             for (gx, gz) in keys:
                 key = (self.p.dim, gx, gz)
                 if key not in self.state or self.state[key]["status"] not in (LIVE, READY, FETCHING):
-                    self.state[key] = {"status": QUEUED, "lod": 0, "gen": 0,
+                    self.state[key] = {"status": QUEUED, "gen": 0,
                                        "last_seen": self.time(), "version": None}
                     self._push(0.0, key)
         return len(keys)

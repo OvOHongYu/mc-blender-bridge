@@ -16,8 +16,6 @@ _defaults = {
     "dim": "minecraft:overworld",
     "r_load": 8,
     "r_unload": 11,
-    "lod1_dist": 6,
-    "lod2_dist": 10,
     "ymin": -64,
     "ymax": 320,
     "mode": "mesh",
@@ -66,10 +64,6 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                   description="以锚点为中心的加载半径（区块）")
     r_unload: bpy.props.IntProperty(name="卸载半径", default=_defaults["r_unload"], min=2, max=96,
                                     description="迟滞卸载半径，应大于加载半径")
-    lod1_dist: bpy.props.IntProperty(name="LOD1 距离", default=_defaults["lod1_dist"], min=1, max=64,
-                                     description="超过该距离的区块关闭 AO")
-    lod2_dist: bpy.props.IntProperty(name="LOD2 距离", default=_defaults["lod2_dist"], min=2, max=96,
-                                     description="超过该距离的区块使用壳网格（大幅减面）")
     ymin: bpy.props.IntProperty(name="Y 下限", default=_defaults["ymin"])
     ymax: bpy.props.IntProperty(name="Y 上限", default=_defaults["ymax"])
     mode: bpy.props.EnumProperty(name="网格模式",

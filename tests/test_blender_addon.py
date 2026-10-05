@@ -51,7 +51,6 @@ class TestAddonSmoke(unittest.TestCase):
         p.host, p.port = "127.0.0.1", PORT
         p.dim = "overworld"
         p.r_load, p.r_unload = 2, 3
-        p.lod1_dist, p.lod2_dist = 1, 2
         p.ymin, p.ymax = -64, 320
         p.mode = "mesh"
         p.leaves = "fancy"

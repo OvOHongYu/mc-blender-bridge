@@ -23,7 +23,6 @@ def connect(p):
         return False, "连接失败: %s" % e
     scheduler = Scheduler(client, Params(
         dim=p.dim, r_load=p.r_load, r_unload=p.r_unload,
-        lod1_dist=p.lod1_dist, lod2_dist=p.lod2_dist,
         ymin=p.ymin, ymax=p.ymax, mode=p.mode,
         leaves_fast=(p.leaves == "fast"), group=int(p.group),
         inflight=p.inflight,

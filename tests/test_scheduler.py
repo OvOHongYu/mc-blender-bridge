@@ -54,7 +54,7 @@ class TestScheduler(unittest.TestCase):
         cls.httpd.shutdown()
 
     def _scheduler(self, **kw):
-        base = dict(r_load=2, r_unload=3, lod1_dist=1, lod2_dist=2,
+        base = dict(r_load=2, r_unload=3,
                     ymin=-64, ymax=320, inflight=4)
         base.update(kw)
         return self.Scheduler(self.ApiClient("127.0.0.1", PORT), self.Params(**base))
@@ -75,17 +75,6 @@ class TestScheduler(unittest.TestCase):
         sch.update_anchor(8.0 + 16 * 8, 8.0)
         self.assertTrue(imp.apply(sch))
         self.assertNotIn(("overworld", 0, 0), imp.objects)
-        sch.stop()
-
-    def test_lod_by_distance(self):
-        sch = self._scheduler(r_load=3, r_unload=4, lod1_dist=1, lod2_dist=2)
-        imp = FakeImporter()
-        sch.update_anchor(8.0, 8.0)
-        self.assertTrue(imp.apply(sch))
-        self.assertEqual(imp.objects[("overworld", 0, 0)]["lod"], 0)
-        lods = [p["lod"] for k, p in imp.objects.items()]
-        self.assertIn(1, lods)
-        self.assertIn(2, lods)
         sch.stop()
 
     def test_priority_order(self):

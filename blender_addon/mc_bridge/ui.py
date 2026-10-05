@@ -49,8 +49,6 @@ class MCB_PT_panel(bpy.types.Panel):
         col = box.column(align=True)
         col.prop(p, "r_load")
         col.prop(p, "r_unload")
-        col.prop(p, "lod1_dist")
-        col.prop(p, "lod2_dist")
         col.prop(p, "mode")
         col.prop(p, "group")
         col.prop(p, "leaves")

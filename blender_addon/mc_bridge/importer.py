@@ -127,7 +127,6 @@ def create_or_replace(key, payload, mats_resolver):
     obj.location = (cx * 16.0, -cz * 16.0, payload.get("yBottom", 0.0))
     # ID 属性数组不允许字符串，用 dict 存
     obj["mcb_key"] = {"dim": dim, "cx": cx, "cz": cz}
-    obj["mcb_lod"] = payload.get("lod", 0)
     obj.display_type = 'SOLID'
     obj.parent = ensure_root()          # 统一挂到根空物体
     coll = collection()
