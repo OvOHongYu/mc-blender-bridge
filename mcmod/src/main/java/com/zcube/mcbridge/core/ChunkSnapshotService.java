@@ -190,7 +190,12 @@ public final class ChunkSnapshotService {
             sb.append('[');
             List<String> kv = new ArrayList<>();
             for (var p : props) {
-                kv.add(p.getName() + "=" + nameOf(st.get(p)));
+                // 属性值必须用原版序列化名（Property.name）：与 NBT 存档、资产包
+                // blockstate 规则完全一致。不能反射按 Yarn 名找 asString —— 发布包
+                // 里方法已被重映射，反射必失败，模组自定义枚举会退化成 toString()
+                //（大写枚举名，如 snow_side=NONE），资产包规则里是小写 none ->
+                // 变体解析落空，方块被退化成整方块。
+                kv.add(propName(st, p));
             }
             kv.sort(String::compareTo);
             sb.append(String.join(",", kv));
@@ -199,14 +204,9 @@ public final class ChunkSnapshotService {
         return sb.toString();
     }
 
-    private static String nameOf(Comparable<?> v) {
-        try {
-            var m = v.getClass().getMethod("asString");
-            Object r = m.invoke(v);
-            return r != null ? r.toString() : v.toString();
-        } catch (ReflectiveOperationException e) {
-            return v.toString();
-        }
+    /** 属性的序列化键值对（值用原版 Property.name，小写，与 NBT/资产包规则一致）。 */
+    private static <T extends Comparable<T>> String propName(BlockState st, net.minecraft.state.property.Property<T> p) {
+        return p.getName() + "=" + p.name(st.get(p));
     }
 
     /** MCC1 载荷（ymin/ymax 对齐 16 裁剪；空 section 置 null）。 */

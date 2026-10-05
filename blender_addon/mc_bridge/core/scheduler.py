@@ -304,8 +304,10 @@ class Scheduler:
                 nkey, lambda k=nkey: self.client.chunk(
                     k[0], k[1], k[2], self.p.ymin, self.p.ymax))
         from . import assets
+        # AO 不再烘焙（用户设定：Blender 自有光照，不叠加烘焙 AO）；顺带让合并键
+        # 少一个 AO 维度，矩形更少、网格化更快。
         quads, pal, _, models, bio = mesher.mesh_payload_biome(
-            payloads, group=g, with_ao=True, leaves_fast=self.p.leaves_fast,
+            payloads, group=g, with_ao=False, leaves_fast=self.p.leaves_fast,
             pack=assets.current(), fluids=True, biome=self.p.biome_tint)
         import numpy as np
         # 流体几何顶点是小数块坐标 -> 用 float32（整型会截断水面高度）
@@ -336,7 +338,7 @@ class Scheduler:
             kw = ({"biome": self.p.biome_tint}
                   if getattr(self.client, "world", None) is not None else {})
             m = self.client.mesh(dim, gx + dx, gz + dz, self.p.ymin, self.p.ymax,
-                                 lod=0, ao=True,
+                                 lod=0, ao=False,
                                  leaves=("fast" if self.p.leaves_fast else "fancy"),
                                  **kw)
             bio = m.get("biome") if self.p.biome_tint else None
