@@ -321,20 +321,28 @@ def _rot_uv(uu, vv, deg):
     return uu, vv
 
 
-def _rotate_point(p, origin, axis, deg):
-    """绕 origin 的 axis 轴旋转 deg 度（MC 约定：右手系负角）。"""
+def _rotate_point(p, origin, axis, deg, rescale=False):
+    """绕 origin 的 axis 轴旋转 deg 度。
+
+    与原版 BakedQuadFactory.rotateVertex 逐条对齐（1.21.1 字节码核对）：
+      - 角度直接取 JSON 值、JOML rotationAxis(角·π/180, 轴) = 右手系**正角**；
+        （旧实现用了 -deg，方向镜像 —— 非对称旋转元素如凳腿/斜瓦整体错位）
+      - rescale=true 时，旋转后的**垂直两轴**按 1/cos(|deg|) 缩放
+        （MIN/MAX_SCALE = 1/cos(22.5°/45°) - 1，用法为 +1 后按轴乘）；
+      - 缩放发生在旋转之后（transformVertex: p = M(p-o)⊙s + o）。"""
     import math
     if not deg:
         return p
-    a = math.radians(-deg)
+    a = math.radians(deg)
     ca, sa = math.cos(a), math.sin(a)
     x, y, z = (p[0] - origin[0], p[1] - origin[1], p[2] - origin[2])
+    s = (1.0 / math.cos(math.radians(abs(deg)))) if rescale else 1.0
     if axis == 0:
-        y, z = y * ca - z * sa, y * sa + z * ca
+        y, z = (y * ca - z * sa) * s, (y * sa + z * ca) * s
     elif axis == 1:
-        x, z = x * ca + z * sa, -x * sa + z * ca
+        x, z = (x * ca + z * sa) * s, (-x * sa + z * ca) * s
     else:
-        x, y = x * ca - y * sa, x * sa + y * ca
+        x, y = (x * ca - y * sa) * s, (x * sa + y * ca) * s
     return (x + origin[0], y + origin[1], z + origin[2])
 
 
@@ -357,11 +365,14 @@ def build_model_quads(model, texid_of, xr=0, yr=0, uvlock=False):
         x1, y1, z1 = float(to[0]), float(to[1]), float(to[2])
         rot = elem.get("rotation")
         rot_o = rot_a = None
-        rot_deg = 0
+        rot_deg = 0.0
+        rot_rescale = False
         if rot:
             rot_o = tuple(float(v) for v in rot.get("origin", (8, 8, 8)))
             rot_a = {"x": 0, "y": 1, "z": 2}.get(rot.get("axis"), 1)
-            rot_deg = int(round(float(rot.get("angle", 0))))
+            # 不能 int(round())：22.5 会被银行家舍入成 22（角度差 0.5 度）
+            rot_deg = float(rot.get("angle", 0))
+            rot_rescale = bool(rot.get("rescale", False))
         for fname, face in (elem.get("faces") or {}).items():
             d = FACE_DIR.get(fname)
             if d is None:
@@ -390,7 +401,7 @@ def build_model_quads(model, texid_of, xr=0, yr=0, uvlock=False):
                 vp = (v1 + vv * (v2 - v1)) / th
                 uvs.append((up, 1.0 - vp))
                 if rot_deg:
-                    p = _rotate_point(p, rot_o, rot_a, rot_deg)
+                    p = _rotate_point(p, rot_o, rot_a, rot_deg, rot_rescale)
                 verts.append(p)
             cull = FACE_DIR.get(face.get("cullface"), -1)
             out.append((verts, d, texid, int(face.get("tintindex", -1)),
@@ -438,10 +449,13 @@ def apply_variant_transform(quads, xr, yr, uvlock):
     out = []
     for verts, d, texid, tint, cull, uvs in quads:
         nv = list(verts)
+        # blockstate x/y 旋转在原版里是**负角**（与元素级 rotation 的正角相反，
+        # 见 ModelBakeSettings / BakedQuadFactory 的符号差异）；_rotate_point
+        # 按元素语义实现（+deg），此处取负传入。
         if xr:
-            nv = [_rotate_point(p, _CENTER, 0, xr) for p in nv]
+            nv = [_rotate_point(p, _CENTER, 0, -xr) for p in nv]
         if yr:
-            nv = [_rotate_point(p, _CENTER, 1, yr) for p in nv]
+            nv = [_rotate_point(p, _CENTER, 1, -yr) for p in nv]
         nd = _rotate_dir(d, xr, yr)
         ncull = _rotate_dir(cull - 1, xr, yr) + 1 if cull else 0
         out.append((nv, nd, texid, tint, ncull, uvs))
@@ -489,9 +503,9 @@ def _rot_mat3(xr, yr):
     for e in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)):
         p = e
         if xr:
-            p = _rotate_point(p, (0.0, 0.0, 0.0), 0, xr)
+            p = _rotate_point(p, (0.0, 0.0, 0.0), 0, -xr)
         if yr:
-            p = _rotate_point(p, (0.0, 0.0, 0.0), 1, yr)
+            p = _rotate_point(p, (0.0, 0.0, 0.0), 1, -yr)
         cols.append(tuple(int(round(c)) for c in p))
     return tuple(tuple(cols[j][i] for j in range(3)) for i in range(3))
 
@@ -560,10 +574,10 @@ def _rotate_dir(d, xr, yr):
         return d
     v = DIR_VEC[d]
     if xr:
-        p = _rotate_point(v, (0, 0, 0), 0, xr)
+        p = _rotate_point(v, (0, 0, 0), 0, -xr)
         v = (round(p[0]), round(p[1]), round(p[2]))
     if yr:
-        p = _rotate_point(v, (0, 0, 0), 1, yr)
+        p = _rotate_point(v, (0, 0, 0), 1, -yr)
         v = (round(p[0]), round(p[1]), round(p[2]))
     return _DIR_BY_VEC.get(v, d)
 

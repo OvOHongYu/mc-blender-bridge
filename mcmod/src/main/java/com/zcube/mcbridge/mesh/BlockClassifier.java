@@ -87,7 +87,9 @@ public final class BlockClassifier {
         if (s.contains("glass")) {
             return BlockClass.TRANSPARENT;
         }
-        if (s.contains("water") || s.contains("lava")) {
+        // 只有真正的流体方块才是 LIQUID：不能按名字含 "water" 猜 ——
+        // water_cauldron（含水炼药锅）会被误判成流体、整个被替换成流体几何。
+        if (state.getBlock() instanceof net.minecraft.block.FluidBlock) {
             return BlockClass.LIQUID;
         }
         if (s.contains("leaves") || s.contains("sapling") || s.contains("flower")
