@@ -7,6 +7,7 @@ __pycache__/
 mcmod/build/
 mcmod/.gradle/
 mcmod/run/
+mcmod/logs/
 *.class
 
 # Blender

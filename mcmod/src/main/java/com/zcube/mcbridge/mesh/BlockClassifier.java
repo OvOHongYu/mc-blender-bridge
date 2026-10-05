@@ -3,9 +3,10 @@ package com.zcube.mcbridge.mesh;
 import net.minecraft.block.BlockState;
 import net.minecraft.registry.Registries;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.EmptyBlockView;
 
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * BlockState → 六类分类。
@@ -41,7 +42,8 @@ public final class BlockClassifier {
             Map.entry("ladder", BlockClass.NONCUBE),
             Map.entry("rail", BlockClass.NONCUBE));
 
-    private static final Map<String, Integer> CACHE = new ConcurrentHashMap<>();
+    private static final Map<BlockState, Integer> CACHE =
+            java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
 
     private BlockClassifier() {
     }
@@ -51,21 +53,35 @@ public final class BlockClassifier {
             return BlockClass.AIR;
         }
         Identifier id = Registries.BLOCK.getId(state.getBlock());
-        String path = id.getPath();
-        Integer hit = OVERRIDES.get(path);
+        Integer hit = OVERRIDES.get(id.getPath());
         if (hit == null) {
             hit = OVERRIDES.get(id.toString());
         }
         if (hit != null) {
             return hit;
         }
-        return CACHE.computeIfAbsent(id.toString(), k -> fallback(state, path));
+        // BlockState 是全局规范单例，按实例恒等缓存（雪层等方块每层状态形状不同，
+        // 不能按方块 id 缓存）；sections() 只在 server 线程调用，无并发写竞争。
+        Integer cached = CACHE.get(state);
+        if (cached == null) {
+            cached = fallback(state, id.getPath());
+            CACHE.put(state, cached);
+        }
+        return cached;
     }
 
     private static int fallback(BlockState state, String path) {
-        // 原版判定：完整不透明立方体（stone/木板/模组整方块…）→ 遮挡邻居
-        if (state.isOpaque()) {
-            return BlockClass.OPAQUE;
+        // 遮挡判定与原版面剔除同口径：isOpaque() 只是静态标志（楼梯/台阶等
+        // "模型非完整立方体"的方块它也可能是 true），真正决定"邻居的面该不该
+        // 被剔掉"的是 isOpaqueFullCube = 不透明 && 剔除形状是完整立方体。
+        // 用它做 OPAQUE 判据后，任意原版/模组非整方块（箱子/雪层/花盆/花瓶/…）
+        // 都不会错误遮挡邻居，无需按名字逐个特判。
+        try {
+            if (state.isOpaqueFullCube(EmptyBlockView.INSTANCE, BlockPos.ORIGIN)) {
+                return BlockClass.OPAQUE;
+            }
+        } catch (Throwable ignore) {
+            // 个别方块取形状需要世界上下文 -> 按"不遮挡"处理
         }
         String s = path;
         if (s.contains("glass")) {
@@ -80,8 +96,7 @@ public final class BlockClassifier {
                 || s.contains("petal") || s.contains("lichen")) {
             return BlockClass.CUTOUT;
         }
-        // 非不透明且认不出形状（雪层/箱子/漏斗/花盆/蜡烛…以及任意模组装饰方块）：
-        // 必须按"不遮挡"处理，否则邻居朝它的面会被错误剔除，露出空洞。
+        // 非整立方体且认不出语义（雪层/箱子/漏斗/蜡烛…以及任意模组装饰方块）：
         // 保守取 NONCUBE（近似为完整方块但不遮挡）。
         return BlockClass.NONCUBE;
     }

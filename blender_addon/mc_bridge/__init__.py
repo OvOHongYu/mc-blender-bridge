@@ -23,6 +23,15 @@ except ImportError:          # 测试 / 无 Blender 环境下的开发模式
 if _HAS_BPY:
     from . import props, ui, ops, importer, mats   # noqa: F401
 
+    # 调度器用多个工作线程做网格化（纯 Python 段与 Blender 主线程抢 GIL）。
+    # 默认切换间隔 5ms × N 个 CPU 线程 -> 主线程一次等 GIL 可达 ~70ms+，
+    # 走路加载时视口明显顿挫；降到 1ms 后主线程最多等 ~N ms。
+    import sys as _sys
+    try:
+        _sys.setswitchinterval(0.001)
+    except Exception:
+        pass
+
     _CLASSES = (props.MCB_Properties,) + ops.CLASSES + ui.CLASSES
 
     def register():
