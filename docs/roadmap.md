@@ -329,3 +329,37 @@
 > 材质 +1；受控实验（`dist/_overlay_calib.py`，平面铺 1×1 草侧面 + 顶光 π）
 > 实测 sRGB (118.2, 88.5, 59.1) vs 解析 (124.7, 91.6, 62.9)，与上式一致。
 
+
+## v1.3.1 修复记录（R8 控制模式实机验收）
+
+> 控制模式接真实世界（含 Ultramarine 模组 518 方块）实测暴露的一批问题，
+> 全部有实况数据/字节码取证，非猜测修复。
+
+- **方块遮挡判据**：BlockClassifier 原用反射按 Yarn 方法名探测遮挡 —— 发布包
+  经 loom 重映射后方法名为 intermediary，反射必然失败，整片掉进"名字猜不到 ->
+  OPAQUE"兜底：所有非整方块（箱子/雪层/花盆/模组花瓶…）错误遮挡邻居。
+  改为 isOpaqueFullCube（= 原版面剔除同口径：不透明 && 剔除形状是完整立方体），
+  任意原版/模组方块通用正确；缓存按 BlockState 恒等键（雪层等每层状态形状不同）。
+  验证：gradle runServer + /api/blocks 全注册表对拍。
+- **模型元素级 rotation 三处错误**（凳腿散架 / 瓦当斜面填满整格）：
+  对照 BakedQuadFactory.rotateVertex 字节码 —— ①角度应为右手系**正角**（旧实现
+  镜像）；②escale 未实现（垂直两轴 x 1/cos(|angle|)，旋转后缩放）；
+  ③int(round(22.5)) 银行家舍入成 22 度。注意原版两套符号相反：blockstate 级
+  x/y 旋转为负角（TestVariantRotation 7 项对拍为证），元素级为正角。
+- **状态属性序列化名**：stateName() 属性值反射 sString() —— 与遮挡判据同类
+  的重映射问题，模组自定义枚举退化为 toString() 大写（snow_side=NONE），资产包
+  规则是小写 -> 变体不命中 -> 整方块（离线扫描走存档 NBT 全是小写，故从未暴露；
+  用玩家实况 /api/chunk 普查才抓到）。改用原版 Property.name(value)。
+- **water_cauldron 误判流体**：兜底按"名字含 water"猜液体 -> 含水炼药锅整个被
+  替换成流体几何。改为 instanceof FluidBlock 精确判定。
+- **LOD 分层移除**（用户决策）：所有距离统一满质量网格，消除远看方块化/拉近
+  重建的闪变；lod1_dist/lod2_dist 面板项随之移除（协议保留 lod 参数）。
+- **AO 不再烘焙**（用户决策）：Blender 自有光照；合并键少一个 AO 维度，
+  矩形拆分更少。
+- **性能**：_fluid_quads 只在液体格 +-1 包围盒内计算（内容顶到 ymax 的体积
+  138ms -> 3ms）；贪心平面内按键分组向量化 + 包围盒内提矩形 + _rects 位运算
+  （单组 158~169ms -> 118ms，输出与旧实现逐位一致，A/B 对拍与 Java 夹具不受
+  影响）；Blender 工作线程 GIL 争抢用 setswitchinterval(0.001) 压制（主线程
+  50ms tick 最大漂移 69.6ms -> 33.1ms）。
+- **MCC1 v2**：Section 附带 4x4x4 群系（名表 + 64 下标），控制模式本地网格与
+  存档模式共用同一条按群系染色链路；A/B 一致性测试恢复（904 != 909 -> 相等）。
