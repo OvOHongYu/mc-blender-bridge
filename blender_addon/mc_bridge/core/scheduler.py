@@ -264,12 +264,14 @@ class Scheduler:
             self.log("fetch error", key, e)
 
     def _fetch_geo(self, dim, gx, gz, lod):
-        # LOD0 且已加载资产包时走本地网格：只有本地网格路径能注入烘焙模型
-        # （近处楼梯/栅栏需要真实几何）；LOD2（及未开模型时的 LOD1）仍用服务端
-        # 网格保吞吐。两条路径都按整组产出：本地路径在组内跨区块贪心合并，
-        # 服务端路径把组内各区块网格拼成一个对象（R4）。
+        # LOD0/1 且已加载资产包时走本地网格：本地路径能注入烘焙模型（近处楼梯/
+        # 栅栏/模组装饰需要真实形状），而控制模式的"服务端网格"在 Java 侧、
+        # 没有资产包，非整方块只能近似成带贴图的整方块（存档模式的 LOD1 在
+        # Blender 侧网格化、一直有模型 —— 两种模式观感必须一致）。
+        # LOD2（及未开模型时的 LOD1）仍用服务端网格保吞吐：壳网格只是高度场，
+        # 远处的装饰形状不重要。两条路径都按整组产出（R4）。
         if lod < 2 and (self.p.mode == "raw"
-                        or (lod == 0 and self._models_on())):
+                        or (lod <= 1 and self._models_on())):
             geo = self._fetch_geo_local(dim, gx, gz, lod)
         else:
             geo = self._fetch_geo_server(dim, gx, gz, lod)
