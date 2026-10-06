@@ -34,6 +34,7 @@ _defaults = {
     "progress": "",
     "progress_pct": 0.0,
     "emission_scale": 4.0,
+    "emission_improved": True,
 }
 
 
@@ -111,3 +112,10 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                                         "(0..15)/15 × 本值。0 关闭自发光；"
                                                         "Cycles 下自发光面可真实照亮场景。"
                                                         "改动即时生效（含已加载区块）")
+    emission_improved: bpy.props.BoolProperty(name="改进自发光",
+                                              default=_defaults["emission_improved"],
+                                              description="开启后发光颜色先经对比度(2.1)与饱和度(0.9)"
+                                                          "处理，只让贴图高光部分主导发光，强度系数"
+                                                          "自动 ×0.175（默认 4.0 → 0.7），避免原版式"
+                                                          "整块均匀泛光的观感；关闭则整块按亮度发光。"
+                                                          "变更后材质自动重建")

@@ -96,7 +96,9 @@ class MCB_PT_panel(bpy.types.Panel):
 
         box = lay.box()
         box.label(text="渲染 / 交付")
-        box.prop(p, "emission_scale")
+        row = box.row(align=True)
+        row.prop(p, "emission_scale")
+        box.prop(p, "emission_improved")
         row = box.row()
         row.operator("mcb.prewarm", icon='RENDER_ANIMATION')
         row.operator("mcb.bake", icon='FILE_BLEND')

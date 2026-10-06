@@ -25,6 +25,23 @@ _worker = None
 # 发光（R6）：/api/blocks 的逐状态亮度表（含模组方块）+ 全局 Emission 倍率
 _light_map = None
 _emission_scale = 4.0
+# 改进自发光：发光颜色先过 对比度(2.1) -> 饱和度(0.9)，强度系数再 ×0.175——
+# 贴图高光部分主导发光，避免原版式整块均匀泛光的"脏"观感
+_emission_improved = True
+
+_IMPROVED_CONTRAST = 2.1
+_IMPROVED_SATURATION = 0.9
+_IMPROVED_STRENGTH = 0.175
+
+
+def set_emission_improved(on):
+    """改进自发光开关：变更时重建全部 MCB_ 材质（节点拓扑不同）。"""
+    global _emission_improved
+    on = bool(on)
+    if on == _emission_improved:
+        return
+    _emission_improved = on
+    _drop_mcb_materials()
 
 
 def set_light_map(m):
@@ -311,8 +328,10 @@ def _wire(mat, img, block, transparent=False, glow=0):
     """构造节点树: Image × ColorAttribute("Col") -> Principled。
 
     glow>0（发光方块，R6）时追加 Emission 并 Add 叠加：
-        Surface = Principled + Emission(贴图×tint, strength = 亮度/15 × 倍率)
-    Cycles 下自发光面可真实照亮场景（萤石/岩浆/火把等效原版点光源）。"""
+        Surface = Principled + Emission(发光色, strength = 亮度/15 × 倍率[×0.175])
+    Cycles 下自发光面可真实照亮场景（萤石/岩浆/火把等效原版点光源）。
+    改进自发光（默认开）：发光色 = 正片叠底结果 -> 对比度(2.1) -> 饱和度(0.9)，
+    只让贴图高光部分主导发光（原版是整个模型均匀放光，观感脏）。"""
     mat.use_nodes = True
     nt = mat.node_tree
     nodes, links = nt.nodes, nt.links
@@ -344,9 +363,21 @@ def _wire(mat, img, block, transparent=False, glow=0):
     surf = bsdf.outputs["BSDF"]
     if glow > 0:
         emi = nodes.new('ShaderNodeEmission')
-        emi.inputs["Strength"].default_value = glow / 15.0 * _emission_scale
+        strength = glow / 15.0 * _emission_scale
+        if _emission_improved:
+            strength *= _IMPROVED_STRENGTH
+        emi.inputs["Strength"].default_value = strength
+        color_src = mix.outputs["Color"]
+        if _emission_improved:
+            bc = nodes.new('ShaderNodeBrightContrast')
+            bc.inputs["Contrast"].default_value = _IMPROVED_CONTRAST
+            links.new(color_src, bc.inputs["Color"])
+            hsv = nodes.new('ShaderNodeHueSaturation')
+            hsv.inputs["Saturation"].default_value = _IMPROVED_SATURATION
+            links.new(bc.outputs["Color"], hsv.inputs["Color"])
+            color_src = hsv.outputs["Color"]
+        links.new(color_src, emi.inputs["Color"])
         add = nodes.new('ShaderNodeAddShader')
-        links.new(mix.outputs["Color"], emi.inputs["Color"])
         links.new(surf, add.inputs[0])
         links.new(emi.outputs["Emission"], add.inputs[1])
         surf = add.outputs["Shader"]

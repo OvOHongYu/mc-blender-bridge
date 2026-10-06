@@ -118,32 +118,71 @@ class TestEmissionNodes(unittest.TestCase):
         mats._wire(mat, img, block, transparent=False, glow=glow)
         return mat
 
+    @staticmethod
+    def _find(mat, ntype):
+        return [n for n in mat.node_tree.nodes if n.type == ntype]
+
     def setUp(self):
         for m in list(bpy.data.materials):
             if m.name.startswith("MCB_"):
                 bpy.data.materials.remove(m)
         mats.set_light_map(None)
         mats.set_emission_scale(4.0)
+        mats.set_emission_improved(True)
 
     def test_glowstone_has_emission(self):
         mat = self._mk("minecraft:glowstone", 15, "MCB_glow__top")
-        emis = [n for n in mat.node_tree.nodes
-                if n.type == "ShaderNodeEmission"]
+        emis = self._find(mat, "ShaderNodeEmission")
         self.assertEqual(len(emis), 1)
+        # 改进自发光：15/15 × 4.0 × 0.175 = 0.7
+        self.assertAlmostEqual(emis[0].inputs["Strength"].default_value, 0.7)
+        self.assertTrue(self._find(mat, "ShaderNodeAddShader"))
+
+    def test_improved_chain_contrast_saturation(self):
+        mat = self._mk("minecraft:glowstone", 15, "MCB_glow__top")
+        bcs = self._find(mat, "ShaderNodeBrightContrast")
+        hsvs = self._find(mat, "ShaderNodeHueSaturation")
+        self.assertEqual(len(bcs), 1)
+        self.assertEqual(len(hsvs), 1)
+        self.assertAlmostEqual(bcs[0].inputs["Contrast"].default_value, 2.1)
+        self.assertAlmostEqual(hsvs[0].inputs["Saturation"].default_value, 0.9)
+        # 链路: Mix(正片叠底) -> 对比度 -> 饱和度 -> Emission.Color
+        links = list(mat.node_tree.links)
+        pairs = {id(l[1]): l[0] for l in links}
+        emi = self._find(mat, "ShaderNodeEmission")[0]
+        src_hsv = pairs[id(emi.inputs["Color"])]
+        self.assertIs(src_hsv, hsvs[0].outputs["Color"])
+        src_bc = pairs[id(hsvs[0].inputs["Color"])]
+        self.assertIs(src_bc, bcs[0].outputs["Color"])
+
+    def test_improved_off_is_plain(self):
+        mats.set_emission_improved(False)
+        mat = self._mk("minecraft:glowstone", 15, "MCB_glow__off")
+        self.assertFalse(self._find(mat, "ShaderNodeBrightContrast"))
+        self.assertFalse(self._find(mat, "ShaderNodeHueSaturation"))
+        emis = self._find(mat, "ShaderNodeEmission")
         self.assertAlmostEqual(emis[0].inputs["Strength"].default_value, 4.0)
-        self.assertTrue([n for n in mat.node_tree.nodes
-                         if n.type == "ShaderNodeAddShader"])
+
+    def test_improved_toggle_rebuilds(self):
+        mat = self._mk("minecraft:glowstone", 15, "MCB_glow__toggle")
+        self.assertTrue(self._find(mat, "ShaderNodeBrightContrast"))
+        mats.set_emission_improved(False)
+        # 拓扑变更 -> 旧材质整体重建
+        self.assertIsNone(bpy.data.materials.get("MCB_glow__toggle"))
+        mat2 = self._mk("minecraft:glowstone", 15, "MCB_glow__toggle")
+        self.assertFalse(self._find(mat2, "ShaderNodeBrightContrast"))
+        mats.set_emission_improved(True)
 
     def test_plain_block_has_no_emission(self):
         mat = self._mk("minecraft:stone", 0, "MCB_stone__top")
-        self.assertFalse([n for n in mat.node_tree.nodes
-                          if n.type == "ShaderNodeEmission"])
+        self.assertFalse(self._find(mat, "ShaderNodeEmission"))
 
     def test_scale_hot_update(self):
+        mats.set_emission_improved(False)
         mat = self._mk("minecraft:glowstone", 15, "MCB_glow__top")
-        mats.set_emission_scale(8.0)
         emis = next(n for n in mat.node_tree.nodes
                     if n.type == "ShaderNodeEmission")
+        mats.set_emission_scale(8.0)
         self.assertAlmostEqual(emis.inputs["Strength"].default_value, 8.0)
         mats.set_emission_scale(0.0)
         self.assertAlmostEqual(emis.inputs["Strength"].default_value, 0.0)

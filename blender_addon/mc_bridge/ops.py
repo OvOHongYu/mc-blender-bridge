@@ -102,6 +102,7 @@ def step_tick(p, scene):
     # 3. 贴图补全 / 版本轮询 / 发光倍率热更新（变更时就地缩放 Emission）
     mats.flush()
     mats.set_emission_scale(getattr(p, "emission_scale", 4.0))
+    mats.set_emission_improved(getattr(p, "emission_improved", True))
     scheduler.maybe_poll_versions()
     # 4. 进度条（预热 / 首载）：LIVE 占全部受管组的比例
     c = scheduler.counts()

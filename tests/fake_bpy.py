@@ -254,6 +254,15 @@ class _NodeTree:
             n.inputs["Color"] = _NodeSocket("Color")
             n.inputs["Strength"] = _NodeSocket("Strength")
             n.outputs["Emission"] = _NodeSocket("Emission")
+        elif ntype == 'ShaderNodeBrightContrast':
+            n.inputs["Color"] = _NodeSocket("Color")
+            n.inputs["Bright"] = _NodeSocket("Bright")
+            n.inputs["Contrast"] = _NodeSocket("Contrast")
+            n.outputs["Color"] = _NodeSocket("Color")
+        elif ntype == 'ShaderNodeHueSaturation':
+            for s in ("Hue", "Saturation", "Value", "Fac", "Color"):
+                n.inputs[s] = _NodeSocket(s)
+            n.outputs["Color"] = _NodeSocket("Color")
         elif ntype == 'ShaderNodeAddShader':
             # 真实 Blender 的 Add Shader 按索引访问（inputs[0]/[1]）
             n.inputs[0] = _NodeSocket("Shader")
