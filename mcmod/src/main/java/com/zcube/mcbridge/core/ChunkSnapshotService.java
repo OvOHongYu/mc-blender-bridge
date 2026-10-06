@@ -182,7 +182,9 @@ public final class ChunkSnapshotService {
         return new SectionBiomes(names, ids);
     }
 
-    private static String stateName(BlockState st) {
+    /** 方块状态的序列化名（id[排序后的 k=v,...]，值用 Property.name，
+     *  与 NBT 存档/资产包规则一致）。/api/blocks 的 lights 表也用它做键。 */
+    public static String stateName(BlockState st) {
         Identifier id = net.minecraft.registry.Registries.BLOCK.getId(st.getBlock());
         StringBuilder sb = new StringBuilder(id.toString());
         var props = st.getProperties();

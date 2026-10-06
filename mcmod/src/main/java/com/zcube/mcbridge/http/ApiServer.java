@@ -172,7 +172,12 @@ public final class ApiServer {
                     lights.append(',');
                 }
                 lfirst = false;
-                lights.append(jsonString(s.toString())).append(':').append(lum);
+                // 键与调色板状态名同构（stateName：id[排序 k=v]，值用
+                // Property.name）——不能用 State.toString()（带 Block{} 前缀，
+                // 且模组枚举会退化成大写 toString）
+                lights.append(jsonString(
+                        com.zcube.mcbridge.core.ChunkSnapshotService.stateName(s)))
+                        .append(':').append(lum);
             }
         }
         sb.append("},\"lights\":{").append(lights)
