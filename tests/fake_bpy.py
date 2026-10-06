@@ -382,16 +382,16 @@ class Scene:
 # ---------------------------------------------------------------- bpy ----
 
 class _Context:
-    def __init__(self):
+    def __init__(self, wm=None):
         self.scene = Scene()
-        self.window_manager = types.SimpleNamespace(fileselect_add=lambda *a: None,
-                                                    invoke_props_dialog=lambda *a: None)
+        self.window_manager = wm if wm is not None else _make_window_manager()
         self.selected_objects = []
 
 
 class _Handlers:
     def __init__(self):
         self.frame_change_post = []
+        self.load_post = []
 
 
 class _Timers:
@@ -406,6 +406,33 @@ class _Timers:
             self.registered.remove(fn)
         else:
             raise ValueError("timer not registered")
+
+
+def _make_window_manager():
+    """window_manager：fileselect + 状态栏原生进度条（记录调用供测试断言）。"""
+    prog = {"on": False, "begins": 0, "ends": 0, "updates": [], "range": None}
+
+    def progress_begin(lo, hi):
+        prog["on"] = True
+        prog["begins"] += 1
+        prog["range"] = (lo, hi)
+        prog["updates"] = []
+
+    def progress_update(v):
+        prog["updates"].append(v)
+
+    def progress_end():
+        if prog["on"]:
+            prog["ends"] += 1
+        prog["on"] = False
+
+    return types.SimpleNamespace(
+        fileselect_add=lambda *a: None,
+        invoke_props_dialog=lambda *a: None,
+        progress_begin=progress_begin,
+        progress_update=progress_update,
+        progress_end=progress_end,
+        _progress=prog)
 
 
 _registered_classes = {}
@@ -480,6 +507,7 @@ def build_bpy():
         materials=_Collection(Material),
         images=_Collection(Image),
         collections=_Collection(Collection),
+        filepath="",                    # 当前 .blend 路径（load_post 模拟用）
     )
     data.libraries = types.SimpleNamespace(
         write=lambda path, blocks: _lib_write(path, blocks))

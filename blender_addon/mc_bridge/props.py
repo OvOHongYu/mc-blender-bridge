@@ -31,6 +31,8 @@ _defaults = {
     "sync_player": False,
     "status": "未连接",
     "stats": "",
+    "progress": "",
+    "progress_pct": 0.0,
 }
 
 
@@ -97,3 +99,7 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                              description="锚点（默认跟随相机，也可选空物体/角色）")
     status: bpy.props.StringProperty(name="状态", default=_defaults["status"])
     stats: bpy.props.StringProperty(name="统计", default=_defaults["stats"])
+    # 进度（预热/首载）：面板与状态栏原生进度条共用；不直接暴露给用户编辑
+    progress: bpy.props.StringProperty(name="加载进度", default=_defaults["progress"])
+    progress_pct: bpy.props.FloatProperty(name="进度%", default=_defaults["progress_pct"],
+                                          min=0.0, max=100.0)

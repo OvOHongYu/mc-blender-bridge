@@ -232,10 +232,17 @@
 
 - 发光方块（萤石/岩浆）输出自发光节点（Emission × 原版 light 值）。
 
-## R7 稳定性与生态 [P1·易]
+## R7 稳定性与生态 [P1·易] ✅ 已完成
 
-- `load_post` 残留对象处理（提示转静态或清除，当前仅有手动卸载）；
-- 进度条 UI（预热/首载时显示区块 x/y）；
+- `load_post` 残留对象处理（提示转静态或清除，当前仅有手动卸载）。
+  ✅ 已完成：注册 `load_post` 处理器——按**文件路径变化**区分真实切档与
+  memfile 撤销（undo/redo 也触发 load_post，同路径只重建材质缓存不重置连接）；
+  切档时作废旧连接、检测场景中的 `MCB_` 残留对象并在面板提示
+  **转为静态保留 / 全部清除**（`mcb.leftover_keep` / `mcb.leftover_clear`）；
+- 进度条 UI（预热/首载时显示区块 x/y）。
+  ✅ 已完成：`step_tick` 按调度器计数（LIVE / QUEUED+FETCHING+READY）计算
+  组级进度，面板显示"加载中/预热中 x/y (z%)"（Blender 4.x 用 `layout.progress`
+  进度条控件，旧版回退文本），状态栏同步驱动原生 `wm.progress_*`；
 - CI：GitHub Actions 跑 pytest + Java 对拍 + 打包发布（zip/jar artifact）。
   ✅ 已完成（v1.3.1）：`ci.yml`（push/PR → pytest 全量 + 夹具再生对拍 +
   `gradle build` 含跨语言一致性对拍 + `pack_release.py` 打包 artifact）、

@@ -178,6 +178,71 @@ class TestAddonSmoke(unittest.TestCase):
         self.ops.disconnect(p)
         self.importer.unload_all()
 
+    # ------------------------------------------------------------ 进度 ----
+    def test_progress_ui_first_load(self):
+        import fake_bpy as _fb
+        p = self._p()
+        self._set_props(p)
+        ok, _ = self.ops.connect(p)
+        self.assertTrue(ok)
+        sch = self.state.scheduler()
+        self.ops.step_tick(p, self._scene())
+        self.assertTrue(p.progress, "首载应显示进度文本")
+        self.assertIn("加载中", p.progress)
+        self.assertGreaterEqual(p.progress_pct, 0.0)
+        wm = bpy.context.window_manager
+        self.assertTrue(wm._progress["on"], "应启动状态栏原生进度条")
+        for _ in range(250):
+            self.ops.step_tick(p, self._scene())
+            if not sch.ready and not sch.queue and not sch.inflight_keys:
+                break
+            time.sleep(0.02)
+        self.ops.step_tick(p, self._scene())
+        self.assertEqual(p.progress, "", "全部加载完成后进度文本应清空")
+        self.assertFalse(wm._progress["on"], "加载完成后应关闭原生进度条")
+        self.ops.disconnect(p)
+        self.importer.unload_all()
+
+    # ------------------------------------------------------------ load_post ----
+    def test_load_post_leftover_and_reset(self):
+        import fake_bpy as _fb
+        p = self._p()
+        self._set_props(p)
+        ok, _ = self.ops.connect(p)
+        self.assertTrue(ok)
+        # 模拟打开新文件（路径变化）-> 连接应重置
+        bpy.data.filepath = "//fake_a.blend"
+        self.ops._on_load_post()
+        self.assertIsNone(self.state.scheduler(), "切换文件后连接应重置")
+        self.assertEqual(self.state.leftover(), 0)
+        # 造两个残留对象，再模拟打开含残留对象的文件
+        coll = self.importer.collection()
+        for nm in ("MCB_ow_0_0", "MCB_ow_2_0"):
+            coll.objects.link(bpy.data.objects.new(nm))
+        bpy.data.filepath = "//fake_b.blend"
+        self.ops._on_load_post()
+        self.assertEqual(self.state.leftover(), 2)
+        self.assertIn("残留", p.status)
+        # 同一路径再次触发（模拟 undo/redo）-> 不重复重置/不弹残留
+        self.ops._on_load_post()
+        self.assertEqual(self.state.leftover(), 2)
+        # 选择全部清除
+        ret = fake_bpy.call_operator("mcb.leftover_clear", bpy.context)
+        self.assertEqual(ret, {'FINISHED'})
+        self.assertEqual(self.importer.count_live(), 0)
+        self.assertEqual(self.state.leftover(), 0)
+        # 转为静态保留
+        coll.objects.link(bpy.data.objects.new("MCB_ow_4_4"))
+        bpy.data.filepath = "//fake_c.blend"
+        self.ops._on_load_post()
+        self.assertEqual(self.state.leftover(), 1)
+        ret = fake_bpy.call_operator("mcb.leftover_keep", bpy.context)
+        self.assertEqual(ret, {'FINISHED'})
+        self.assertEqual(self.importer.count_live(), 1, "转静态应保留对象")
+        self.assertEqual(self.state.leftover(), 0)
+        self.importer.unload_all()
+        bpy.data.filepath = ""
+
     # ------------------------------------------------------------ 材质 ----
     def test_material_placeholder_and_texture(self):
         client = None

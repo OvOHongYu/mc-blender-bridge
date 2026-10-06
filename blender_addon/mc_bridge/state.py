@@ -9,6 +9,7 @@ _info = None            # /api/ping 结果
 _blocks = None          # /api/blocks 结果
 _timer_on = False
 _frame_hook_on = False
+_leftover = 0           # load_post 检测到的残留动态对象数（提示转静态或清除）
 
 
 def set_runtime(client, scheduler, info, blocks):
@@ -43,11 +44,21 @@ def timers():
     return _timer_on, _frame_hook_on
 
 
+def set_leftover(n):
+    global _leftover
+    _leftover = max(0, int(n))
+
+
+def leftover():
+    return _leftover
+
+
 def clear():
-    global _client, _scheduler, _info, _blocks, _timer_on, _frame_hook_on
+    global _client, _scheduler, _info, _blocks, _timer_on, _frame_hook_on, _leftover
     with _lock:
         _client = _scheduler = _info = _blocks = None
         _timer_on = _frame_hook_on = False
+        _leftover = 0
 
 
 def ensure_assets(p):

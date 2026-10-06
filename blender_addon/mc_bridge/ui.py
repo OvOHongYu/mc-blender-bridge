@@ -2,6 +2,8 @@
 """N 面板 UI。"""
 import bpy
 
+from . import state
+
 
 class MCB_PT_panel(bpy.types.Panel):
     bl_label = "MC Bridge 动态区块"
@@ -13,6 +15,15 @@ class MCB_PT_panel(bpy.types.Panel):
     def draw(self, context):
         lay = self.layout
         p = context.scene.mcb
+
+        n = state.leftover()
+        if n:
+            box = lay.box()
+            box.alert = True
+            box.label(text="发现 %d 个残留区块对象" % n, icon='ERROR')
+            row = box.row(align=True)
+            row.operator("mcb.leftover_keep", icon='CHECKMARK')
+            row.operator("mcb.leftover_clear", icon='TRASH')
 
         box = lay.box()
         box.label(text="加载模式")
@@ -29,7 +40,23 @@ class MCB_PT_panel(bpy.types.Panel):
         row.operator("mcb.connect", icon='LINKED')
         row.operator("mcb.disconnect", icon='UNLINKED')
         box.label(text=p.status)
+        if p.progress:
+            box = lay.box()
+            col = box.column(align=True)
+            prog = getattr(col, "progress", None)
+            drawn = False
+            if prog is not None:        # Blender 4.x 的进度条控件
+                try:
+                    prog(factor=min(max(p.progress_pct / 100.0, 0.0), 1.0),
+                         type='BAR', text=p.progress)
+                    drawn = True
+                except Exception:
+                    drawn = False
+            if not drawn:
+                col.label(text=p.progress, icon='TIME')
         if p.stats:
+            if p.progress:
+                box = lay.box()
             box.label(text=p.stats, icon='MESH_GRID')
 
         box = lay.box()

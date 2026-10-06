@@ -12,6 +12,7 @@ from .core.scheduler import Params, Scheduler
 
 def connect(p):
     """p: MCB_Properties。返回 (ok, message)。存档模式走独立数据源。"""
+    state.set_leftover(0)               # 重新连接后残留对象由调度器接管
     state.ensure_assets(p)
     if getattr(p, "load_mode", "control") == "save":
         return opssave.connect_save(p)
@@ -98,12 +99,47 @@ def step_tick(p, scene):
     # 3. 贴图补全 / 版本轮询
     mats.flush()
     scheduler.maybe_poll_versions()
-    # 4. 状态栏
+    # 4. 进度条（预热 / 首载）：LIVE 占全部受管组的比例
     c = scheduler.counts()
+    live = c.get("LIVE", 0)
+    pending = c.get("QUEUED", 0) + c.get("FETCHING", 0) + c.get("READY", 0)
+    total = live + pending
+    if pending:
+        frac = live / total if total else 0.0
+        p.progress = "%s %d/%d (%d%%)" % (
+            "预热中" if scheduler.frozen else "加载中", live, total,
+            int(frac * 100.0))
+        p.progress_pct = frac * 100.0
+        _wm_progress(frac)
+    else:
+        p.progress = ""
+        p.progress_pct = 0.0
+        _wm_progress(None)
+    # 5. 状态栏
     p.stats = "LIVE %d | 队列 %d | 在途 %d | 面数 %.1fM | 贴图 %d" % (
         c.get("LIVE", 0), c.get("queue", 0), c.get("FETCHING", 0),
         scheduler.stats.get("tris", 0) / 1e6, mats.pending_count())
     return applied or evicted > 0
+
+
+_wm_prog = {"on": False}
+
+
+def _wm_progress(frac=None):
+    """Blender 状态栏原生进度条。frac=None 结束；无窗口/不支持的宿主静默跳过。"""
+    try:
+        wm = bpy.context.window_manager
+        if frac is None:
+            if _wm_prog["on"]:
+                wm.progress_end()
+                _wm_prog["on"] = False
+            return
+        if not _wm_prog["on"]:
+            wm.progress_begin(0, 1000)
+            _wm_prog["on"] = True
+        wm.progress_update(int(max(0.0, min(1.0, frac)) * 1000))
+    except Exception:
+        _wm_prog["on"] = False
 
 
 def importer_apply(scheduler, limit):
@@ -124,16 +160,20 @@ def importer_apply(scheduler, limit):
 
 def disconnect(p, keep_objects=True):
     if getattr(p, "load_mode", "control") == "save":
-        return opssave.disconnect_save(p, keep_objects=keep_objects)
-    scheduler = state.scheduler()
-    if scheduler is not None:
-        scheduler.stop()
-    state.clear()
-    mats.reset()
-    if not keep_objects:
-        importer.unload_all()
+        ret = opssave.disconnect_save(p, keep_objects=keep_objects)
+    else:
+        scheduler = state.scheduler()
+        if scheduler is not None:
+            scheduler.stop()
+        state.clear()
+        mats.reset()
+        if not keep_objects:
+            importer.unload_all()
+        ret = True
+    p.progress = ""
+    _wm_progress(None)
     p.status = "未连接"
-    return True
+    return ret
 
 
 def prewarm_camera(p, scene):
@@ -176,6 +216,49 @@ def bake_static(filepath):
     data_blocks = list(objs) + list(meshes) + list(materials) + list(images)
     bpy.data.libraries.write(filepath, set(data_blocks))
     return True, "已写入 %d 对象 -> %s" % (len(objs), filepath)
+
+
+# ------------------------------------------------------------- load_post ----
+
+_load_state = {"path": None}
+
+
+def _on_load_post(*_args):
+    """load_post：打开 .blend 后清理陈旧运行时并检测残留动态对象。
+
+    memfile 撤销/重做也会触发 load_post——用文件路径是否变化区分：
+    同一文件的 undo 只重建材质缓存（旧 ID 引用已失效），不重置连接。"""
+    try:
+        path = bpy.data.filepath
+    except Exception:
+        return
+    if path == _load_state["path"]:
+        mats.reset()
+        return
+    _load_state["path"] = path
+    _handle_file_switched()
+
+
+def _handle_file_switched():
+    p = getattr(bpy.context.scene, "mcb", None)
+    if p is None:
+        return
+    # 1. 运行中的连接作废：对象体系已随旧文件释放，锚点指针也已失效
+    if state.scheduler() is not None:
+        try:
+            bpy.app.timers.unregister(_timer)
+        except Exception:
+            pass
+        state.set_timers(timer_on=False)
+        disconnect(p, keep_objects=True)
+        p.status = "已打开新文件，连接已重置"
+    # 2. 残留动态对象（随旧文件保存的 MCB_ 区块）：提示转静态或清除
+    n = importer.count_live()
+    state.set_leftover(n)
+    if n:
+        p.status = "发现 %d 个残留区块对象（转为静态保留或全部清除）" % n
+    mats.reset()
+    _wm_progress(None)
 
 
 # ------------------------------------------------------------- 操作符 ----
@@ -227,6 +310,35 @@ class MCB_OT_unload_all(bpy.types.Operator):
     def execute(self, context):
         n = importer.unload_all()
         self.report({'INFO'}, "已卸载 %d 个对象" % n)
+        return {'FINISHED'}
+
+
+class MCB_OT_leftover_keep(bpy.types.Operator):
+    bl_idname = "mcb.leftover_keep"
+    bl_label = "转为静态保留"
+    bl_description = ("把残留的 MCB_ 区块对象当作普通静态几何保留"
+                      "（重新连接后同名区块会被调度器重新生成替换）")
+
+    def execute(self, context):
+        n = state.leftover()
+        state.set_leftover(0)
+        p = context.scene.mcb
+        if n:
+            p.status = "已保留 %d 个静态区块对象" % n
+            self.report({'INFO'}, p.status)
+        return {'FINISHED'}
+
+
+class MCB_OT_leftover_clear(bpy.types.Operator):
+    bl_idname = "mcb.leftover_clear"
+    bl_label = "清除残留对象"
+    bl_description = "删除场景中全部 MCB_ 区块对象（含随旧文件保存的残留）"
+
+    def execute(self, context):
+        n = importer.unload_all()
+        state.set_leftover(0)
+        context.scene.mcb.status = "已清除 %d 个残留对象" % n
+        self.report({'INFO'}, context.scene.mcb.status)
         return {'FINISHED'}
 
 
@@ -394,6 +506,8 @@ def _frame_change(scene):
 def register_handlers():
     if _frame_change not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_frame_change)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister_handlers():
@@ -401,9 +515,14 @@ def unregister_handlers():
         bpy.app.handlers.frame_change_post.remove(_frame_change)
     except ValueError:
         pass
+    try:
+        bpy.app.handlers.load_post.remove(_on_load_post)
+    except ValueError:
+        pass
 
 
 CLASSES = (MCB_OT_connect, MCB_OT_disconnect, MCB_OT_unload_all,
+           MCB_OT_leftover_keep, MCB_OT_leftover_clear,
            MCB_OT_use_selected_as_anchor, MCB_OT_prewarm, MCB_OT_bake,
            MCB_OT_refresh, MCB_OT_bind_camera, MCB_OT_pick_save_dir,
            MCB_OT_load_assets)
