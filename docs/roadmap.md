@@ -237,6 +237,9 @@
 - `load_post` 残留对象处理（提示转静态或清除，当前仅有手动卸载）；
 - 进度条 UI（预热/首载时显示区块 x/y）；
 - CI：GitHub Actions 跑 pytest + Java 对拍 + 打包发布（zip/jar artifact）。
+  ✅ 已完成（v1.3.1）：`ci.yml`（push/PR → pytest 全量 + 夹具再生对拍 +
+  `gradle build` 含跨语言一致性对拍 + `pack_release.py` 打包 artifact）、
+  `release.yml`（打 `v*` tag 自动发版，内置 GITHUB_TOKEN 免 PAT）。
 
 ## R8 群系染色（biome tint）\[P1·难]
 
