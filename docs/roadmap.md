@@ -343,10 +343,10 @@
   验证：gradle runServer + /api/blocks 全注册表对拍。
 - **模型元素级 rotation 三处错误**（凳腿散架 / 瓦当斜面填满整格）：
   对照 BakedQuadFactory.rotateVertex 字节码 —— ①角度应为右手系**正角**（旧实现
-  镜像）；②escale 未实现（垂直两轴 x 1/cos(|angle|)，旋转后缩放）；
+  镜像）；②rescale 未实现（垂直两轴 x 1/cos(|angle|)，旋转后缩放）；
   ③int(round(22.5)) 银行家舍入成 22 度。注意原版两套符号相反：blockstate 级
   x/y 旋转为负角（TestVariantRotation 7 项对拍为证），元素级为正角。
-- **状态属性序列化名**：stateName() 属性值反射 sString() —— 与遮挡判据同类
+- **状态属性序列化名**：stateName() 属性值反射 asString() —— 与遮挡判据同类
   的重映射问题，模组自定义枚举退化为 toString() 大写（snow_side=NONE），资产包
   规则是小写 -> 变体不命中 -> 整方块（离线扫描走存档 NBT 全是小写，故从未暴露；
   用玩家实况 /api/chunk 普查才抓到）。改用原版 Property.name(value)。
