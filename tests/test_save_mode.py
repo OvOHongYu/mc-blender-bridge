@@ -526,11 +526,12 @@ class TestSaveScheduler(unittest.TestCase):
             sel = np.repeat(geo["mat_idx"] == slot, 4)
             verts = np.asarray(geo["verts"])[sel]
             self.assertEqual(len(verts), 4)                       # 画 = 一个四边形
-            # 组局部坐标：底边中点 (8.5, 70, 8) + 沿 +Z 外移 1/32，宽 2 高 1
+            # 组局部坐标：画面中心 (8.5, 70, 8) + 沿 +Z 外移 1/32，宽 2 高 1
+            # Pos.y = 垂直中心 -> 底边 = 70 - 0.5 = 69.5
             self.assertAlmostEqual(float(verts[:, 0].min()), 7.5)
             self.assertAlmostEqual(float(verts[:, 0].max()), 9.5)
-            self.assertAlmostEqual(float(verts[:, 1].min()), 70.0 - (-64))
-            self.assertAlmostEqual(float(verts[:, 1].max()), 71.0 - (-64))
+            self.assertAlmostEqual(float(verts[:, 1].min()), 69.5 - (-64))
+            self.assertAlmostEqual(float(verts[:, 1].max()), 70.5 - (-64))
             for z in verts[:, 2]:
                 self.assertAlmostEqual(float(z), 8.0 + 1.0 / 32.0, places=5)
             sch.stop()

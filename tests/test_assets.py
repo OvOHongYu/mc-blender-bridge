@@ -291,20 +291,32 @@ class TestPaintingGeometry(unittest.TestCase):
             np.testing.assert_allclose(uv, [(0, 0), (1, 0), (1, 1), (0, 1)],
                                        atol=1e-6)
 
-    def test_size_and_bottom_center(self):
-        # 2×1 画：宽沿墙面水平 2 格（x 8.5 为中点），高 1 格，底边在 Pos.y
+    def test_size_and_center(self):
+        # 2×1 画：宽沿墙面水平 2 格（x 8.5 为中点），高 1 格；
+        # Pos.y = 画的**垂直中心**（实测定案）-> 底边 = Pos.y - h/2
         verts, _uv, tex = self._quad()
         self.assertEqual(tex, 7)
         self.assertAlmostEqual(float(verts[:, 0].min()), 7.5)
         self.assertAlmostEqual(float(verts[:, 0].max()), 9.5)
-        self.assertAlmostEqual(float(verts[:, 1].min()), 70.0)
-        self.assertAlmostEqual(float(verts[:, 1].max()), 71.0)
-        # 1×3 竖画
+        self.assertAlmostEqual(float(verts[:, 1].min()), 69.5)
+        self.assertAlmostEqual(float(verts[:, 1].max()), 70.5)
+        # 1×3 竖画：中心在 Pos.y -> [68.5, 71.5]
         verts, _uv, tex = self._quad(variant="minecraft:test_tall")
         self.assertEqual(tex, 9)
         self.assertAlmostEqual(float(verts[:, 0].min()), 8.0)
         self.assertAlmostEqual(float(verts[:, 0].max()), 9.0)
-        self.assertAlmostEqual(float(verts[:, 1].max()), 73.0)
+        self.assertAlmostEqual(float(verts[:, 1].min()), 68.5)
+        self.assertAlmostEqual(float(verts[:, 1].max()), 71.5)
+
+    def test_center_alignment_matches_vanilla(self):
+        # 回归：不同高度的画垂直中心都应落在 Pos.y（实机偏移规律 h/2 的定案）
+        for variant, (w, h) in (("minecraft:test_wide", (2, 1)),
+                                ("minecraft:test_tall", (1, 3))):
+            verts, _uv, _tex = self._quad(variant=variant)
+            cy = (float(verts[:, 1].min()) + float(verts[:, 1].max())) / 2.0
+            self.assertAlmostEqual(cy, 70.0)
+            self.assertAlmostEqual(float(verts[:, 1].max())
+                                   - float(verts[:, 1].min()), h)
 
     def test_skips_unknown(self):
         ent = {"id": "minecraft:painting", "variant": "minecraft:nope",
@@ -327,8 +339,8 @@ class TestPaintingGeometry(unittest.TestCase):
         self.assertEqual(geo["nq"], 1)
         self.assertEqual(geo["mats"], [("tex", 7)])
         self.assertEqual(geo["tris"], 2)
-        # 世界 -> 区块局部：y 相对 y_bottom
-        self.assertAlmostEqual(float(geo["verts"][:, 1].min()), 70.0 + 64)
+        # 世界 -> 区块局部：y 相对 y_bottom（画中心在 Pos.y=70，h=1 -> 底 69.5）
+        self.assertAlmostEqual(float(geo["verts"][:, 1].min()), 69.5 + 64)
         self.assertEqual(geo["vcol"].min(), 255)          # 实体不上色
         self.assertIsNone(entities.build_geo([], self._Pack(), 0, 0, -64))
 

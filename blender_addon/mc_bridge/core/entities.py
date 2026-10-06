@@ -6,14 +6,12 @@
 **画（painting）**：自 1.21 起画变体由数据驱动
 （`data/<ns>/painting_variant/<id>.json` 的 width/height/asset_id），
 烘焙进 MCBA v4；这里按实体 NBT 的 variant / facing / Pos 生成一个平面四边形。
-定位约定（NBT 字段语义可查证，几何落位含一处标注假设）：
+定位约定（**已实测定案**，四面墙多尺寸画与游戏画面逐一对齐）：
   - variant -> (宽 w, 高 h, 贴图) 来自资产包；
   - facing  -> 画面朝向：0=南(+Z) 1=西(-X) 2=北(-Z) 3=东(+X)（wiki 明确）；
-  - Pos     -> 画面底边中点（MC 实体原点位于包围盒底面中心的通用约定），
-               再沿 facing 外移 1/32 方块（原版画与墙之间留有缝）。
-  未与原版逐块对拍：Pos 的水平参考点（底边中点 vs 角块）与 1/32 这一定值
-  来自通用约定；1.21.4 及以前另有 TileX/TileY/TileZ、1.21.5+ 改为 block_pos，
-  如需严格一致需在真实存档 + 游戏画面上核对（见 docs/roadmap.md R5）。
+  - Pos     -> 画面的**中心**（水平居中 + 垂直居中——初版把 Pos.y 当底边，
+               整幅画向上偏移 h/2 且偏移量与高度成正比、与宽度无关，实测
+               抓出），再沿 facing 外移 1/32 方块（原版画与墙之间留有缝）。
 
 **盔甲架（armor_stand）**：原版形状是代码定义模型（非 JSON），由
 tools/be_models/DumpEntityModels.java 从客户端 jar 的模型工厂导出为**分层**
@@ -69,9 +67,11 @@ def painting_quads(ent, pack):
         return None
     fwd, right = facing
     px, py, pz = (float(pos[0]), float(pos[1]), float(pos[2]))
-    # 画面中心（= 底边中点沿 facing 外移一格缝）
+    # 画面中心：Pos = 画面的**中心**（水平居中 + 垂直居中，实测定案：
+    # 原把 Pos.y 当底边导致整幅画向上偏移 h/2、与宽度无关），再沿 facing
+    # 外移 1/32 方块（原版画与墙之间留有缝）
     cx = px + fwd[0] * _GAP
-    cy = py
+    cy = py - h / 2.0
     cz = pz + fwd[2] * _GAP
     hw = w / 2.0
     verts = np.array([
