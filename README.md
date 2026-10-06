@@ -90,7 +90,7 @@ N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
 | `blender_addon/mc_bridge/` | Blender 插件（bpy 层 + 纯 Python 核心） | ✅ 已实现并测试 |
 | `server_sim/` | MC 模拟服务器（无 MC 环境的开发/测试替身，与模组 API 同构） | ✅ 已实现并测试 |
 | `mcmod/` | Fabric 服务端模组（Java） | ✅ 源码完整；纯 Java 部分已与 Python 逐字节对拍 |
-| `tests/` | 122 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
+| `tests/` | 202 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
 | `docs/` | 设计方案 / 协议规范 / 用户手册 / 路线图 / 预览图 | ✅ |
 | `tools/` | 资产烘焙、夹具生成、预览导出、Java 合并验证脚本 | ✅ |
 
@@ -122,10 +122,10 @@ python3 server_sim/mc_server_sim.py --port 8788
 ```bash
 # 1. 构建模组（需 JDK 17+ 与网络）
 cd mcmod && gradle build  # 需 Gradle 8.14+（或用 IDE 打开 mcmod 执行）
-# 产物: build/libs/mcbridge-1.3.0.jar
+# 产物: build/libs/mcbridge-1.4.0.jar
 
 # 2. 服务端安装（推荐独立服务端，无暂停问题；单人模式请"对局域网开放"）
-cp mcbridge-1.3.0.jar <服务端>/mods/
+cp mcbridge-1.4.0.jar <服务端>/mods/
 # 启动服务端，确认日志: "MC Bridge API 已启动: http://127.0.0.1:8788"
 
 # 3. Blender 插件连接 127.0.0.1:8788（默认端口）
@@ -134,7 +134,7 @@ cp mcbridge-1.3.0.jar <服务端>/mods/
 ## 测试
 
 ```bash
-# Python 全量（122 项：编解码/网格器/调度器/存档解析/实体与画/插件冒烟/端到端/原版对拍）
+# Python 全量（202 项：编解码/网格器/调度器/存档解析/实体与画/发光/插件冒烟/端到端/原版对拍）
 python3 -m pytest tests/
 
 # 跨语言一致性（Java vs Python 夹具逐字节对拍，仅需 JRE）
@@ -176,6 +176,10 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
   画按 NBT 生成平面四边形并入区块对象。
 - **确定性渲染**：预热模式（遍历帧范围收集区块并集）与烘焙静态化
   （导出 .blend 库，兼容无 MC 的渲染农场）。
+- **发光交付（R6）**：发光方块按原版亮度生成 Emission（Cycles 下真实照亮
+  场景）；支持"改进自发光"（对比度/饱和度预处理，高光主导发光）、总开关与
+  强度倍率热更新；亮度数据 = `/api/blocks` 的 `lights` 逐状态表（含模组方块）
+  + 内置原版表（存档模式）+ 可选的 ID 关键词策略（模组"灯"类兜底）。
 - **一致性**：Python 参考实现 ↔ Java 实现 通过夹具逐字节对拍；
   模式 A（Blender 本地网格）与模式 B（服务端网格）逐面一致。
 
@@ -200,9 +204,10 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
   注：岩浆的液体分类来自资产包（`bake_assets` 的 `water/lava` 启发式）；
   未加载资产包时共享小表只收录水，岩浆会退回不透明整方块。淡水体（海/湖/含水层）
   与含水方块不受此限。
-- 实体渲染**画与盔甲架**（存档模式 + 控制模式）。画的落位按
-  `Pos` = 画面底边中点、沿 `facing` 外移 1/32，**未与原版逐块对拍**
-  （`tools/paintings_report.py` 出对拍报告，见 [docs/roadmap.md](docs/roadmap.md) R5）；
+- 实体渲染**画与盔甲架**（存档模式 + 控制模式）。画的落位已**实测定案**：
+  MC 实体 `Pos` = 画面中心（水平居中 + 垂直居中），底边 = `Pos.y − h/2`，
+  沿 `facing` 外移 1/32（多尺寸四面墙与游戏画面逐一对齐，
+  `tools/paintings_report.py` 出对拍报告，见 [docs/roadmap.md](docs/roadmap.md) R5）；
   盔甲架的 Pose 装配与部件显隐已对照原版反汇编实现，但**整体落位**
   （Small 缩放 / 全局朝向 / 底边对齐）属近似，且未在真实游戏画面核对；
   控制模式实体需新版模组（`/api/ping` 声明 `entities:true`）并经真实游戏验证。
@@ -215,5 +220,6 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
 
 ## 未来规划
 
-见 [docs/roadmap.md](docs/roadmap.md)（R6 渲染增强、R7 生态、R8 群系染色；
-R4 跨区块合并与 R5 实体已完成/部分完成，逐条记录见该文档）。
+见 [docs/roadmap.md](docs/roadmap.md)——R2–R8 各条目已全部完成
+（v1.4.0：R6 发光方块、R7 CI/进度条/残留对象、R5 画定位定案；
+逐条实现记录与验证方式见该文档）。
