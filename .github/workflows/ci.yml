@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install numpy pillow
+      - run: pip install numpy pillow pytest
       - name: pytest 全量
         run: python -m pytest tests/ -q
       - name: 夹具再生对拍（Python 参考实现 vs 已提交夹具）

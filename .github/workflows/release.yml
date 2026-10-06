@@ -27,7 +27,7 @@ jobs:
 
       - name: pytest 全量
         run: |
-          pip install numpy pillow
+          pip install numpy pillow pytest
           python -m pytest tests/ -q
 
       - name: 构建 + 一致性对拍
