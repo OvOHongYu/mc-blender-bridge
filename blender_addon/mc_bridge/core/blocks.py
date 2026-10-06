@@ -156,6 +156,85 @@ def texture_name(name, face):
     return faces[idx]
 
 
+# ---------------------------------------------------------------- 发光（R6）----
+# 原版亮度表（block id -> luminance 0..15，取自 1.21.1 客户端字节码
+# Block.Settings.luminance）。状态相关的亮度（点亮的红石灯、蜡烛数等）
+# 走 _LIGHT_STATEFUL 的公式；控制模式下 /api/blocks 的 "lights" 表
+# （逐状态精确、含模组方块）优先于本表。
+_LIGHT_STATIC = {
+    # 15
+    "minecraft:glowstone": 15, "minecraft:lava": 15,
+    "minecraft:sea_lantern": 15, "minecraft:jack_o_lantern": 15,
+    "minecraft:shroomlight": 15, "minecraft:lava_cauldron": 15,
+    "minecraft:lantern": 15, "minecraft:beacon": 15, "minecraft:conduit": 15,
+    "minecraft:end_gateway": 15, "minecraft:end_portal": 15,
+    "minecraft:fire": 15, "minecraft:ochre_froglight": 15,
+    "minecraft:verdant_froglight": 15, "minecraft:pearlescent_froglight": 15,
+    # 14 / 11 / 10
+    "minecraft:torch": 14, "minecraft:wall_torch": 14, "minecraft:end_rod": 14,
+    "minecraft:nether_portal": 11,
+    "minecraft:soul_torch": 10, "minecraft:soul_wall_torch": 10,
+    "minecraft:soul_lantern": 10, "minecraft:soul_fire": 10,
+    "minecraft:crying_obsidian": 10,
+    # 7 / 6 / 5 / 4 / 2 / 1
+    "minecraft:redstone_torch": 7, "minecraft:redstone_wall_torch": 7,
+    "minecraft:glow_lichen": 7, "minecraft:enchanting_table": 7,
+    "minecraft:ender_chest": 7,
+    "minecraft:sculk_catalyst": 6,
+    "minecraft:amethyst_cluster": 5,
+    "minecraft:large_amethyst_bud": 4,
+    "minecraft:medium_amethyst_bud": 2,
+    "minecraft:small_amethyst_bud": 1, "minecraft:brown_mushroom": 1,
+    "minecraft:red_mushroom": 1, "minecraft:dragon_egg": 1,
+    "minecraft:end_portal_frame": 1, "minecraft:sculk_sensor": 1,
+    "minecraft:calibrated_sculk_sensor": 1, "minecraft:sculk_shrieker": 1,
+    "minecraft:magma_block": 3,
+}
+
+_LIGHT_STATEFUL = {
+    # base id -> fn(props dict) -> luminance（props 为空 dict 时按默认状态）
+    "minecraft:light": lambda p: int(p.get("level", 15) or 0),
+    "minecraft:sea_pickle": lambda p: 3 * int(p.get("pickles", 1) or 1)
+                                      + (3 if p.get("waterlogged") == "true" else 0),
+    "minecraft:candle": lambda p: 3 * int(p.get("candles", 1) or 1)
+                                  if p.get("lit") == "true" else 0,
+    "minecraft:candle_cake": lambda p: 3 if p.get("lit") == "true" else 0,
+    "minecraft:respawn_anchor": lambda p: 3 * int(p.get("charges", 0) or 0),
+    "minecraft:redstone_lamp": lambda p: 15 if p.get("lit") == "true" else 0,
+    "minecraft:campfire": lambda p: 15 if p.get("lit") == "true" else 0,
+    "minecraft:soul_campfire": lambda p: 10 if p.get("lit") == "true" else 0,
+    "minecraft:redstone_ore": lambda p: 9 if p.get("lit") == "true" else 0,
+    "minecraft:deepslate_redstone_ore": lambda p: 9 if p.get("lit") == "true" else 0,
+    "minecraft:cave_vines": lambda p: 14 if p.get("berries") == "true" else 0,
+    "minecraft:cave_vines_plant": lambda p: 14 if p.get("berries") == "true" else 0,
+}
+
+
+def light_of(name, light_map=None):
+    """方块状态的发光亮度（原版 luminance，0..15）。用于 Emission 强度。
+
+    light_map: /api/blocks 下发的 "lights"（逐状态精确、含模组方块）优先；
+    未命中回退内置原版表（状态相关的按 _LIGHT_STATEFUL 公式）。
+    """
+    if light_map:
+        v = light_map.get(name)
+        if v is None:
+            v = light_map.get(base_name(name))
+        if v is not None:
+            try:
+                return max(0, min(15, int(v)))
+            except (TypeError, ValueError):
+                pass
+    base = base_name(name)
+    fn = _LIGHT_STATEFUL.get(base)
+    if fn is not None:
+        try:
+            return max(0, min(15, int(fn(props_of(name)))))
+        except (TypeError, ValueError):
+            return 0
+    return _LIGHT_STATIC.get(base, 0)
+
+
 def blocks_json():
     """供 /api/blocks 返回的字典。"""
     out = {}

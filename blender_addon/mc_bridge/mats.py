@@ -22,6 +22,65 @@ _task_q = queue.Queue()
 _fetcher_ref = None          # 后台线程使用的 tex_fetcher（连接期固定）
 _worker = None
 
+# 发光（R6）：/api/blocks 的逐状态亮度表（含模组方块）+ 全局 Emission 倍率
+_light_map = None
+_emission_scale = 4.0
+
+
+def set_light_map(m):
+    """连接时设置一次：/api/blocks 下发的 "lights"（状态名 -> 0..15）。"""
+    global _light_map
+    _light_map = m if isinstance(m, dict) and m else None
+
+
+def set_emission_scale(v):
+    """全局发光倍率热更新：就地改写已有材质的 Emission 强度（无需重建）。
+
+    材质节点里的 Strength 按"当时的倍率"写入，这里按比例缩放；
+    旧倍率为 0 的材质没建发光节点，只能整体重建。"""
+    global _emission_scale
+    try:
+        v = max(0.0, float(v))
+    except (TypeError, ValueError):
+        return
+    old = _emission_scale
+    if abs(v - old) <= 1e-6:
+        return
+    _emission_scale = v
+    if old <= 1e-6:
+        _drop_mcb_materials()
+        return
+    ratio = v / old
+    for mat in list(bpy.data.materials):
+        if not mat.name.startswith("MCB_") or not mat.use_nodes:
+            continue
+        nt = getattr(mat, "node_tree", None)
+        if nt is None:
+            continue
+        for n in nt.nodes:
+            if getattr(n, "type", "") == "ShaderNodeEmission":
+                try:
+                    n.inputs["Strength"].default_value *= ratio
+                except Exception:
+                    pass
+
+
+def _drop_mcb_materials():
+    for m in list(bpy.data.materials):
+        if m.name.startswith("MCB_"):
+            try:
+                bpy.data.materials.remove(m)
+            except Exception:
+                pass
+
+
+def _glow_of(block):
+    """方块状态的发光亮度（0..15）。"""
+    try:
+        return B.light_of(block, _light_map)
+    except Exception:
+        return 0
+
 
 def set_tex_fetcher(fetcher):
     """连接时设置一次（后台线程用）。"""
@@ -127,9 +186,10 @@ def get_material(block, facegrp, tex_fetcher=None, overlay=None):
 
 def get_material_for(desc, tex_fetcher=None):
     """材质描述符 -> 材质。
-    ("block", 方块名, facegrp[, 叠加层贴图id]) 或 ("tex", texId)。"""
+    ("block", 方块名, facegrp[, 叠加层贴图id[, glow]]) 或 ("tex", texId[, glow])。"""
     if desc[0] == "tex":
-        return get_model_material(int(desc[1]))
+        glow = int(desc[2]) if len(desc) > 2 else 0
+        return get_model_material(int(desc[1]), glow)
     overlay = desc[3] if len(desc) > 3 else None
     return get_material(desc[1], desc[2], tex_fetcher, overlay)
 
@@ -174,12 +234,13 @@ def _tex_has_alpha(pack, tid):
 def _apply_pack_texture(mat, block, tid):
     pack = _pack()
     img = _pack_image(pack, tid)
-    _wire(mat, img, block, transparent=_transparent(block))
+    _wire(mat, img, block, transparent=_transparent(block),
+          glow=_glow_of(block))
 
 
-def get_model_material(tex_id):
-    """烘焙模型面材质（按贴图 id 共享）。"""
-    name = "MCB_tex_%d" % tex_id
+def get_model_material(tex_id, glow=0):
+    """烘焙模型面材质（按贴图 id 共享；glow>0 时为发光变体，R6）。"""
+    name = "MCB_tex_%d" % tex_id + ("_g%d" % glow if glow > 0 else "")
     mat = bpy.data.materials.get(name)
     if mat is not None:
         return mat
@@ -189,7 +250,7 @@ def get_model_material(tex_id):
         _setup_placeholder(mat, "minecraft:stone")
         return mat
     img = _pack_image(pack, tex_id)
-    _wire(mat, img, None, transparent=_tex_has_alpha(pack, tex_id))
+    _wire(mat, img, None, transparent=_tex_has_alpha(pack, tex_id), glow=glow)
     return mat
 
 
@@ -242,11 +303,16 @@ def _apply_texture(block, facegrp, png_path):
     if img is None:
         img = bpy.data.images.load(png_path)
         img.name = name
-    _wire(mat, img, block, transparent=_transparent(block))
+    _wire(mat, img, block, transparent=_transparent(block),
+          glow=_glow_of(block))
 
 
-def _wire(mat, img, block, transparent=False):
-    """构造节点树: Image × ColorAttribute("Col") -> Principled。"""
+def _wire(mat, img, block, transparent=False, glow=0):
+    """构造节点树: Image × ColorAttribute("Col") -> Principled。
+
+    glow>0（发光方块，R6）时追加 Emission 并 Add 叠加：
+        Surface = Principled + Emission(贴图×tint, strength = 亮度/15 × 倍率)
+    Cycles 下自发光面可真实照亮场景（萤石/岩浆/火把等效原版点光源）。"""
     mat.use_nodes = True
     nt = mat.node_tree
     nodes, links = nt.nodes, nt.links
@@ -275,7 +341,16 @@ def _wire(mat, img, block, transparent=False):
     links.new(tex.outputs["Color"], mix.inputs["Color1"])
     links.new(vcol.outputs["Color"], mix.inputs["Color2"])
     links.new(mix.outputs["Color"], bsdf.inputs["Base Color"])
-    links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    surf = bsdf.outputs["BSDF"]
+    if glow > 0:
+        emi = nodes.new('ShaderNodeEmission')
+        emi.inputs["Strength"].default_value = glow / 15.0 * _emission_scale
+        add = nodes.new('ShaderNodeAddShader')
+        links.new(mix.outputs["Color"], emi.inputs["Color"])
+        links.new(surf, add.inputs[0])
+        links.new(emi.outputs["Emission"], add.inputs[1])
+        surf = add.outputs["Shader"]
+    links.new(surf, out.inputs["Surface"])
     if transparent:
         links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
         if block is not None and B.block_info(block)[1] == B.LIQUID:

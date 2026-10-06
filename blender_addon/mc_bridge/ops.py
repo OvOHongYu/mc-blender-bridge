@@ -15,6 +15,7 @@ def connect(p):
     state.set_leftover(0)               # 重新连接后残留对象由调度器接管
     state.ensure_assets(p)
     if getattr(p, "load_mode", "control") == "save":
+        mats.set_light_map(None)        # 存档模式没有 /api/blocks，走内置原版表
         return opssave.connect_save(p)
     client = ApiClient(p.host, p.port)
     try:
@@ -29,8 +30,10 @@ def connect(p):
         inflight=p.inflight,
         use_models=getattr(p, "use_models", True),
         biome_tint=getattr(p, "biome_tint", True),
-        version_interval=p.version_poll))
+        version_interval=p.version_poll,
+        light=(blocks.get("lights") if isinstance(blocks, dict) else None)))
     state.set_runtime(client, scheduler, info, blocks)
+    mats.set_light_map(blocks.get("lights") if isinstance(blocks, dict) else None)
     p.status = "已连接 %s (MC %s)" % (info.get("mod", "?"), info.get("mcVersion", "?"))
     return True, p.status
 
@@ -96,8 +99,9 @@ def step_tick(p, scene):
     for key, reason in scheduler.poll_evict(p.evict_per_tick):
         importer.delete_key(key)
         evicted += 1
-    # 3. 贴图补全 / 版本轮询
+    # 3. 贴图补全 / 版本轮询 / 发光倍率热更新（变更时就地缩放 Emission）
     mats.flush()
+    mats.set_emission_scale(getattr(p, "emission_scale", 4.0))
     scheduler.maybe_poll_versions()
     # 4. 进度条（预热 / 首载）：LIVE 占全部受管组的比例
     c = scheduler.counts()
@@ -167,6 +171,7 @@ def disconnect(p, keep_objects=True):
             scheduler.stop()
         state.clear()
         mats.reset()
+        mats.set_light_map(None)
         if not keep_objects:
             importer.unload_all()
         ret = True

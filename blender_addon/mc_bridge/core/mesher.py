@@ -609,12 +609,15 @@ def _model_cells(verts16, dirs):
 
 
 def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
-                    biome=None):
+                    biome=None, light=None):
     """完整方块数组 + 可选烘焙模型 -> 导入器几何字典。
 
     mats 为材质描述符列表:
-      ("block", 方块名, facegrp) —— 完整方块按面组取贴图
-      ("tex",   texId)          —— 烘焙模型按贴图 id 取贴图
+      ("block", 方块名, facegrp, 叠加层[, glow]) —— 完整方块按面组取贴图
+      ("tex",   texId[, glow])                  —— 烘焙模型按贴图 id 取贴图
+    glow 为该方块状态的原版亮度（0..15，blocks.light_of；0 时省略），
+    材质侧据此追加 Emission 节点（R6 发光方块）。同一贴图被多个模型面共用时
+    取其面的最大亮度（火把/灯笼这类非整方块模型的发光在模型路径下发）。
     """
     from . import blocks as B
     nq = verts.shape[0]
@@ -623,6 +626,8 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
         return {"nq": 0, "verts": np.zeros((0, 3), np.float32),
                 "uv": np.zeros((0, 2), np.float32), "vcol": np.zeros((0, 4), np.uint8),
                 "mat_idx": np.zeros(0, np.uint16), "mats": [], "tris": 0}
+    # 逐 palette 状态算一次亮度（light=/api/blocks 表优先，回退内置原版表）
+    glows = [B.light_of(n, light) for n in palette]
 
     parts = []          # (verts, uv, vcol, inv, mats)
     if nq:
@@ -671,8 +676,11 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
         for k in uniq:
             pi, fg = int(k) >> 2, int(k) & 3
             ov = ovs[pi]
-            mats.append(("block", palette[pi], ("top", "bottom", "side")[fg],
-                         ov[fg][0] if ov and fg in ov else None))
+            d = ("block", palette[pi], ("top", "bottom", "side")[fg],
+                 ov[fg][0] if ov and fg in ov else None)
+            if glows[pi] > 0:
+                d += (glows[pi],)
+            mats.append(d)
         parts.append((vf.reshape(-1, 3), uv.reshape(-1, 2), vcol.reshape(-1, 4),
                       inv.astype(np.uint16), mats))
 
@@ -687,9 +695,16 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
         mblk = np.array([m[6] for m in models], np.uint16)
         mcol = np.ones((nm, 3), np.float32)
         mkind = np.zeros(nm, np.uint8)
+        mglow = np.zeros(nm, np.int32)
+        glow_cache = {}
         for i, ti in enumerate(mtint):
+            bi = int(mblk[i])
+            g = glow_cache.get(bi)
+            if g is None:
+                g = glow_cache[bi] = glows[bi]
+            mglow[i] = g
             if ti >= 0:
-                bname = palette[mblk[i]]
+                bname = palette[bi]
                 mcol[i] = B.default_tint(bname)
                 mkind[i] = B.tint_kind(bname) or B.TINT_KIND_GRASS
         if biome is not None and mkind.any():
@@ -705,7 +720,11 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
                                  0, 255).astype(np.uint8)
         vcol[:, :, 3] = np.clip(mshade * 255.0, 0, 255).astype(np.uint8)
         uniq, inv = np.unique(mtex, return_inverse=True)
-        mats = [("tex", int(t)) for t in uniq]
+        # 同一贴图可能被多个模型面共用：发光取其面的最大亮度
+        gmax = np.zeros(len(uniq), np.int32)
+        np.maximum.at(gmax, inv, mglow)
+        mats = [("tex", int(t)) if g <= 0 else ("tex", int(t), int(g))
+                for t, g in zip(uniq, gmax)]
         parts.append((mv, muv, vcol.reshape(-1, 4), inv.astype(np.uint16), mats))
 
     verts_all = np.concatenate([p[0] for p in parts])

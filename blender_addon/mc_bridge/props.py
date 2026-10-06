@@ -33,6 +33,7 @@ _defaults = {
     "stats": "",
     "progress": "",
     "progress_pct": 0.0,
+    "emission_scale": 4.0,
 }
 
 
@@ -103,3 +104,10 @@ class MCB_Properties(bpy.types.PropertyGroup):
     progress: bpy.props.StringProperty(name="加载进度", default=_defaults["progress"])
     progress_pct: bpy.props.FloatProperty(name="进度%", default=_defaults["progress_pct"],
                                           min=0.0, max=100.0)
+    emission_scale: bpy.props.FloatProperty(name="自发光强度", default=_defaults["emission_scale"],
+                                            min=0.0, max=100.0,
+                                            description="发光方块（萤石/岩浆/海晶灯/火把等）的 "
+                                                        "Emission 强度倍率：实际强度 = 原版亮度"
+                                                        "(0..15)/15 × 本值。0 关闭自发光；"
+                                                        "Cycles 下自发光面可真实照亮场景。"
+                                                        "改动即时生效（含已加载区块）")

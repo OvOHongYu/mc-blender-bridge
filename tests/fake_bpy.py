@@ -250,6 +250,15 @@ class _NodeTree:
             n.inputs["Color1"] = _NodeSocket("Color1")
             n.inputs["Color2"] = _NodeSocket("Color2")
             n.outputs["Color"] = _NodeSocket("Color")
+        elif ntype == 'ShaderNodeEmission':
+            n.inputs["Color"] = _NodeSocket("Color")
+            n.inputs["Strength"] = _NodeSocket("Strength")
+            n.outputs["Emission"] = _NodeSocket("Emission")
+        elif ntype == 'ShaderNodeAddShader':
+            # 真实 Blender 的 Add Shader 按索引访问（inputs[0]/[1]）
+            n.inputs[0] = _NodeSocket("Shader")
+            n.inputs[1] = _NodeSocket("Shader")
+            n.outputs["Shader"] = _NodeSocket("Shader")
         return n
 
 
@@ -505,7 +514,9 @@ def build_bpy():
         meshes=_Collection(Mesh),
         objects=_Collection(Object),
         materials=_Collection(Material),
-        images=_Collection(Image),
+        # images.new(name, w, h) 只取名字（真实 Image.filepath 由 load() 填）
+        images=_Collection(lambda *a, **kw: Image(a[0] if a
+                                                  else kw.get("name", "Image"))),
         collections=_Collection(Collection),
         filepath="",                    # 当前 .blend 路径（load_post 模拟用）
     )

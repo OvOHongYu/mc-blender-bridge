@@ -39,6 +39,9 @@ class Params:
         self.store_cap = kw.get("store_cap", 256)
         self.version_interval = kw.get("version_interval", 5.0)
         self.max_live_tris = kw.get("max_live_tris", 60_000_000)
+        # 发光（R6）：/api/blocks 的 "lights" 逐状态亮度表（含模组方块）；
+        # None 时 blocks.light_of 回退内置原版表（存档模式）
+        self.light = kw.get("light")
 
     def as_dict(self):
         return dict(dim=self.dim, r_load=self.r_load, r_unload=self.r_unload,
@@ -318,7 +321,8 @@ class Scheduler:
         aos = np.array([q[3] for q in quads], np.uint8).reshape(-1, 4)
         from .mesher import geo_from_arrays
         return geo_from_arrays(verts, dirs, blks, aos, [n for _, n in pal],
-                               models=models, pack=assets.current(), biome=bio)
+                               models=models, pack=assets.current(), biome=bio,
+                               light=self.p.light)
 
     def _fetch_geo_server(self, dim, gx, gz):
         """组内逐区块取服务端网格，平移到组局部坐标后拼成一个 geo。
@@ -351,7 +355,7 @@ class Scheduler:
             geos.append(geo_from_arrays(
                 m["verts"], m["dirs"], m["blocks"], m["aos"],
                 [n for _, n in m["palette"]], models=m.get("models"), pack=pack,
-                biome=bio))
+                biome=bio, light=self.p.light))
             offs.append((16.0 * dx, float(m.get("yBottom", self.p.ymin) - self.p.ymin),
                          16.0 * dz))
         if g == 1:

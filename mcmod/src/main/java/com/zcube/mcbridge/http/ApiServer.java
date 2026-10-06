@@ -149,6 +149,10 @@ public final class ApiServer {
     private void blocks(HttpExchange ex) throws IOException {
         StringBuilder sb = new StringBuilder("{\"blocks\":{");
         boolean first = true;
+        // lights（R6）：所有亮度 > 0 的方块状态（逐状态精确、含模组方块），
+        // 供插件给发光方块追加 Emission。只有一小部分状态有亮度，体积可控。
+        StringBuilder lights = new StringBuilder();
+        boolean lfirst = true;
         for (var entry : net.minecraft.registry.Registries.BLOCK.getEntrySet()) {
             var state = entry.getValue().getDefaultState();
             int cls = com.zcube.mcbridge.mesh.BlockClassifier.classify(state);
@@ -159,8 +163,20 @@ public final class ApiServer {
             first = false;
             sb.append(jsonString(id)).append(":{\"class\":").append(cls)
                     .append(",\"tint\":null,\"color\":[0.6,0.6,0.6]}");
+            for (var s : entry.getValue().getStateManager().getStates()) {
+                int lum = s.getLuminance();
+                if (lum <= 0) {
+                    continue;
+                }
+                if (!lfirst) {
+                    lights.append(',');
+                }
+                lfirst = false;
+                lights.append(jsonString(s.toString())).append(':').append(lum);
+            }
         }
-        sb.append("},\"nBlocks\":").append(net.minecraft.registry.Registries.BLOCK.size()).append('}');
+        sb.append("},\"lights\":{").append(lights)
+                .append("},\"nBlocks\":").append(net.minecraft.registry.Registries.BLOCK.size()).append('}');
         json(ex, 200, sb.toString());
     }
 
