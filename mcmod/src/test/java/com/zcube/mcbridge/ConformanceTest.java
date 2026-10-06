@@ -37,6 +37,10 @@ public final class ConformanceTest {
     };
 
     public static void main(String[] args) throws Exception {
+        runAll();
+    }
+
+    static void runAll() throws Exception {
         Path fixtures = Path.of(System.getProperty("fixtures", "../tests/fixtures"));
         byte[] mcc1Fixture = Files.readAllBytes(fixtures.resolve("mcc1_sample.bin"));
         byte[] mcc1BioFixture = Files.readAllBytes(fixtures.resolve("mcc1_biome_sample.bin"));
@@ -163,6 +167,6 @@ public final class ConformanceTest {
         }
     }
 
-    private ConformanceTest() {
+    ConformanceTest() {
     }
 }

@@ -1,0 +1,58 @@
+# 发版：推送 v* 标签 → 全量测试 + 构建 + 打包 → 创建 GitHub Release
+# 依赖仓库内置 GITHUB_TOKEN（permissions.contents=write），无需个人 PAT。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.2.0"
+
+      - name: pytest 全量
+        run: |
+          pip install numpy pillow
+          python -m pytest tests/ -q
+
+      - name: 构建 + 一致性对拍
+        working-directory: mcmod
+        run: gradle build --no-daemon
+
+      - name: 打包
+        run: python tools/pack_release.py
+
+      - name: 生成发行说明
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          if [ -f "docs/releases/v${VER}.md" ]; then
+            cp "docs/releases/v${VER}.md" RELEASE_NOTES.md
+          else
+            echo "## ${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+            echo "详见 docs/roadmap.md" >> RELEASE_NOTES.md
+          fi
+
+      - name: 创建 Release 并上传产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/mc_bridge-*-blender-addon.zip \
+            dist/mc-blender-bridge-*-dist.zip \
+            --title "MC Blender Bridge $GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md

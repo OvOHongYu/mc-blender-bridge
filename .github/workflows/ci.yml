@@ -1,0 +1,52 @@
+# CI：每次 push/PR 自动跑
+#   1) Python 全量测试（pytest，177 项）
+#   2) 夹具再生对拍（gen_fixtures 重生成必须与已提交夹具逐字节一致）
+#   3) Java 构建 + 跨语言一致性对拍（conformanceTest，挂在 build/check 上）
+#   4) 打包产物以 artifact 上传（zip/jar，保留 14 天）
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install numpy pillow
+      - name: pytest 全量
+        run: python -m pytest tests/ -q
+      - name: 夹具再生对拍（Python 参考实现 vs 已提交夹具）
+        run: |
+          python tools/gen_fixtures.py
+          git diff --exit-code tests/fixtures
+
+  java:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.2.0"
+      - name: 构建 + 一致性对拍（conformanceTest 挂在 check 上）
+        working-directory: mcmod
+        run: gradle build --no-daemon
+      - name: 打包发行产物
+        run: python tools/pack_release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mc-blender-bridge-dist
+          path: |
+            dist/mc_bridge-*-blender-addon.zip
+            dist/mc-blender-bridge-*-dist.zip
+          retention-days: 14
+          if-no-files-found: error

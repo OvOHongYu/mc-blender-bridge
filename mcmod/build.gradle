@@ -38,11 +38,19 @@ java {
     targetCompatibility = JavaVersion.VERSION_21
 }
 
-// 一致性测试只需要纯 Java 部分（codec/mesh），不依赖 Minecraft；
-// `./gradlew test` 会连同 ConformanceTest 一起运行。
+// 一致性测试只需要纯 Java 部分（codec/mesh），不依赖 Minecraft。
+// 不用 gradle test：loom 1.11 + Gradle 9 的 test worker 类路径存在
+// ClassNotFoundException（测试类进不了 worker），这里用独立 JavaExec 直跑
+// main()，并挂到 check 上（`gradle build` 即验证）。
+tasks.register("conformanceTest", JavaExec) {
+    group = "verification"
+    description = "跨语言一致性对拍（Java 实现与 Python 夹具逐字节比对）"
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = "com.zcube.mcbridge.ConformanceTest"
+    workingDir = projectDir          // 夹具默认路径 ../tests/fixtures
+}
+tasks.named("check") { dependsOn("conformanceTest") }
+
 test {
-    useJUnitPlatform()
-    testLogging {
-        events "passed", "failed"
-    }
+    enabled = false                  // 见上：loom+Gradle9 worker 类路径问题
 }
