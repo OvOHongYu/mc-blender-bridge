@@ -33,8 +33,11 @@ _defaults = {
     "stats": "",
     "progress": "",
     "progress_pct": 0.0,
+    "emission_on": True,
     "emission_scale": 4.0,
     "emission_improved": True,
+    "emission_prop": True,
+    "emission_keyword": True,
 }
 
 
@@ -105,6 +108,11 @@ class MCB_Properties(bpy.types.PropertyGroup):
     progress: bpy.props.StringProperty(name="加载进度", default=_defaults["progress"])
     progress_pct: bpy.props.FloatProperty(name="进度%", default=_defaults["progress_pct"],
                                           min=0.0, max=100.0)
+    emission_on: bpy.props.BoolProperty(name="自发光",
+                                        default=_defaults["emission_on"],
+                                        description="为发光方块生成 Emission 自发光节点"
+                                                    "（Cycles 下可真实照亮场景）。关闭后不生成"
+                                                    "任何发光节点，材质自动重建")
     emission_scale: bpy.props.FloatProperty(name="自发光强度", default=_defaults["emission_scale"],
                                             min=0.0, max=100.0,
                                             description="发光方块（萤石/岩浆/海晶灯/火把等）的 "
@@ -119,3 +127,15 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                                           "自动 ×0.175（默认 4.0 → 0.7），避免原版式"
                                                           "整块均匀泛光的观感；关闭则整块按亮度发光。"
                                                           "变更后材质自动重建")
+    emission_prop: bpy.props.BoolProperty(name="亮度属性筛选",
+                                          default=_defaults["emission_prop"],
+                                          description="按方块亮度属性筛选发光方块（逐状态精确，"
+                                                      "含模组方块）。与 ID 关键词筛选可同时开启，"
+                                                      "取较大亮度；关闭对应策略后材质自动重建")
+    emission_keyword: bpy.props.BoolProperty(name="ID关键词筛选",
+                                             default=_defaults["emission_keyword"],
+                                             description="按英文 ID 关键词筛选发光方块（lamp/candle/"
+                                                         "lantern/torch/glow/fire/lava 等），命中按满"
+                                                         "亮度发光——用于模组里看起来该发光但未声明"
+                                                         "亮度属性的方块；可能误伤（如未点亮的红石灯、"
+                                                         "火珊瑚），不想要就关掉")

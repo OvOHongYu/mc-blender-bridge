@@ -55,6 +55,58 @@ class TestVanillaLight(unittest.TestCase):
         self.assertEqual(B.light_of("mymod:lamp[lit=true]",
                                     {"mymod:lamp": 9}), 9)
 
+    def test_dyed_candles_save_mode(self):
+        # 存档模式没有 lights 表，内置表必须覆盖 16 色蜡烛/蜡烛蛋糕（用户反馈#2）
+        for c in ("red", "white", "light_blue", "black"):
+            self.assertEqual(
+                B.light_of("minecraft:%s_candle[candles=2,lit=true,"
+                           "waterlogged=false]" % c), 6)
+            self.assertEqual(
+                B.light_of("minecraft:%s_candle[candles=1,lit=false,"
+                           "waterlogged=false]" % c), 0)
+            self.assertEqual(
+                B.light_of("minecraft:%s_candle_cake[lit=true,waterlogged=false]"
+                           % c), 3)
+            self.assertEqual(
+                B.light_of("minecraft:%s_candle_cake[lit=false,waterlogged=false]"
+                           % c), 0)
+
+    def test_keyword_strategy(self):
+        # 模组"灯"类方块：无亮度属性也能按关键词满亮度发光（用户反馈#1）
+        self.assertEqual(B.keyword_light("ultramarine:red_lamp"), 15)
+        self.assertEqual(B.keyword_light("ultramarine:red_lamp[lit=true]"), 15)
+        self.assertEqual(B.keyword_light("mymod:soul_torch"), 15)
+        self.assertEqual(B.keyword_light("minecraft:stone"), 0)
+        # 整词匹配：light_gray_wool 不含 light 关键词（无 "light" token 误伤）
+        self.assertEqual(B.keyword_light("minecraft:light_gray_wool"), 0)
+        # 已知误伤（文档已注明）：火珊瑚/未点亮红石灯
+        self.assertEqual(B.keyword_light("minecraft:fire_coral"), 15)
+        self.assertEqual(B.light_of("minecraft:redstone_lamp[lit=false]"), 0)
+        self.assertEqual(B.keyword_light("minecraft:redstone_lamp"), 15)
+
+    def test_emission_light_strategies(self):
+        lm = {"mymod:lamp[lit=true]": 12}
+        # 属性 + 关键词：取较大值
+        self.assertEqual(
+            B.emission_light("mymod:lamp[lit=true]", lm), 15)
+        self.assertEqual(
+            B.emission_light("mymod:lamp[lit=true]", lm,
+                             by_keyword=False), 12)
+        # 只开关键词：无属性表的方块发光
+        self.assertEqual(
+            B.emission_light("ultramarine:red_lamp", None,
+                             by_property=False, by_keyword=True), 15)
+        # 两种策略都关：恒 0
+        self.assertEqual(
+            B.emission_light("minecraft:glowstone", None,
+                             by_property=False, by_keyword=False), 0)
+        # 属性策略命中但关键词更满
+        self.assertEqual(
+            B.emission_light("minecraft:torch", None), 15)
+        self.assertEqual(
+            B.emission_light("minecraft:torch", None,
+                             by_keyword=False), 14)
+
     def test_light_map_bounds_and_garbage(self):
         self.assertEqual(B.light_of("minecraft:torch", {"minecraft:torch": 99}), 15)
         self.assertEqual(B.light_of("minecraft:torch", {"minecraft:torch": "x"}), 14)
@@ -98,7 +150,28 @@ class TestGeoGlowDesc(unittest.TestCase):
             np.zeros((0, 4, 3), np.float32), np.zeros(0, np.uint8),
             np.zeros(0, np.uint16), np.zeros((0, 4), np.uint8),
             palette, models=[m])
+        # 关键词策略默认开：torch 命中关键词抬到满亮度 15
+        self.assertIn(("tex", 5, 15), geo["mats"])
+        # 只开属性策略：按亮度属性 14
+        geo = mesher.geo_from_arrays(
+            np.zeros((0, 4, 3), np.float32), np.zeros(0, np.uint8),
+            np.zeros(0, np.uint16), np.zeros((0, 4), np.uint8),
+            palette, models=[m], light_keyword=False)
         self.assertIn(("tex", 5, 14), geo["mats"])
+
+    def test_model_desc_keyword_glow(self):
+        # 模组"灯"类方块走模型路径：关键词策略经 desc 下发（用户反馈#1）
+        palette = ["minecraft:air", "ultramarine:red_lamp"]
+        m = [((0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)),
+             0, 5, -1, 0, ((0, 0), (1, 0), (1, 1), (0, 1)), 1, (3, 3, 3, 3)]
+        args = (np.zeros((0, 4, 3), np.float32), np.zeros(0, np.uint8),
+                np.zeros(0, np.uint16), np.zeros((0, 4), np.uint8))
+        geo = mesher.geo_from_arrays(*args, palette, models=[m])
+        self.assertIn(("tex", 5, 15), geo["mats"])
+        # 关键词策略关闭：同一方块不再发光
+        geo = mesher.geo_from_arrays(*args, palette, models=[m],
+                                     light_keyword=False)
+        self.assertIn(("tex", 5), geo["mats"])
 
     def test_model_desc_no_glow(self):
         palette = ["minecraft:air", "minecraft:oak_stairs"]
@@ -129,6 +202,8 @@ class TestEmissionNodes(unittest.TestCase):
         mats.set_light_map(None)
         mats.set_emission_scale(4.0)
         mats.set_emission_improved(True)
+        mats.set_emission_switch(True)
+        mats.set_emission_strategies(True, True)
 
     def test_glowstone_has_emission(self):
         mat = self._mk("minecraft:glowstone", 15, "MCB_glow__top")
@@ -163,6 +238,35 @@ class TestEmissionNodes(unittest.TestCase):
         emis = self._find(mat, "ShaderNodeEmission")
         self.assertAlmostEqual(emis[0].inputs["Strength"].default_value, 4.0)
 
+    def test_master_switch_off(self):
+        # 总开关关闭：不生成任何 Emission 节点（用户反馈#3）
+        mats.set_emission_switch(False)
+        mat = self._mk("minecraft:glowstone", 15, "MCB_glow__noswitch")
+        self.assertFalse(self._find(mat, "ShaderNodeEmission"))
+        self.assertFalse(self._find(mat, "ShaderNodeAddShader"))
+        mats.set_emission_switch(True)
+        # 重建后恢复
+        self.assertIsNone(bpy.data.materials.get("MCB_glow__noswitch"))
+        mat2 = self._mk("minecraft:glowstone", 15, "MCB_glow__noswitch")
+        self.assertTrue(self._find(mat2, "ShaderNodeEmission"))
+
+    def test_strategy_switches(self):
+        # 关闭两种策略：无发光材质（用户反馈#1 的开关部分）
+        mats.set_emission_strategies(False, False)
+        self.assertEqual(mats._glow_of("minecraft:glowstone"), 0)
+        self.assertEqual(mats._glow_of("ultramarine:red_lamp"), 0)
+        mat = self._mk("minecraft:glowstone", 0, "MCB_glow__nostrat")
+        self.assertFalse(self._find(mat, "ShaderNodeEmission"))
+        # 只开关键词：原版属性方块也被关键词满亮度覆盖
+        mats.set_emission_strategies(False, True)
+        self.assertEqual(mats._glow_of("minecraft:glowstone"), 15)
+        self.assertEqual(mats._glow_of("ultramarine:red_lamp"), 15)
+        # 只开属性：模组无名"灯"不发光，火把按属性 14
+        mats.set_emission_strategies(True, False)
+        self.assertEqual(mats._glow_of("ultramarine:red_lamp"), 0)
+        self.assertEqual(mats._glow_of("minecraft:torch"), 14)
+        mats.set_emission_strategies(True, True)
+
     def test_improved_toggle_rebuilds(self):
         mat = self._mk("minecraft:glowstone", 15, "MCB_glow__toggle")
         self.assertTrue(self._find(mat, "ShaderNodeBrightContrast"))
@@ -192,10 +296,18 @@ class TestEmissionNodes(unittest.TestCase):
 
     def test_glow_of_uses_light_map(self):
         mats.set_light_map({"mymod:lamp[lit=true]": 12})
+        # 默认策略（属性+关键词）：属性 12 被关键词 "lamp" 抬到满亮度
+        self.assertEqual(mats._glow_of("mymod:lamp[lit=true]"), 15)
+        self.assertEqual(mats._glow_of("mymod:lamp[lit=false]"), 15)
+        # 只开属性策略：lights 表逐状态精确生效
+        mats.set_emission_strategies(True, False)
         self.assertEqual(mats._glow_of("mymod:lamp[lit=true]"), 12)
         self.assertEqual(mats._glow_of("mymod:lamp[lit=false]"), 0)
         mats.set_light_map(None)
-        self.assertEqual(mats._glow_of("minecraft:torch"), 14)
+        self.assertEqual(mats._glow_of("minecraft:torch"), 14)   # 仅属性策略
+        mats.set_emission_strategies(True, True)
+        self.assertEqual(mats._glow_of("minecraft:torch"), 15)   # 关键词抬满
+        self.assertEqual(mats._glow_of("minecraft:stone"), 0)
 
     def test_model_material_glow_name(self):
         # 无资产包时只建占位材质，这里仅验证命名分发不炸

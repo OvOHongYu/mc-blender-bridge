@@ -42,6 +42,9 @@ class Params:
         # 发光（R6）：/api/blocks 的 "lights" 逐状态亮度表（含模组方块）；
         # None 时 blocks.light_of 回退内置原版表（存档模式）
         self.light = kw.get("light")
+        # 发光筛选策略（R6 反馈）：按亮度属性 / 按英文 ID 关键词
+        self.emission_prop = bool(kw.get("emission_prop", True))
+        self.emission_keyword = bool(kw.get("emission_keyword", True))
 
     def as_dict(self):
         return dict(dim=self.dim, r_load=self.r_load, r_unload=self.r_unload,
@@ -322,7 +325,9 @@ class Scheduler:
         from .mesher import geo_from_arrays
         return geo_from_arrays(verts, dirs, blks, aos, [n for _, n in pal],
                                models=models, pack=assets.current(), biome=bio,
-                               light=self.p.light)
+                               light=self.p.light,
+                               light_prop=self.p.emission_prop,
+                               light_keyword=self.p.emission_keyword)
 
     def _fetch_geo_server(self, dim, gx, gz):
         """组内逐区块取服务端网格，平移到组局部坐标后拼成一个 geo。
@@ -355,7 +360,9 @@ class Scheduler:
             geos.append(geo_from_arrays(
                 m["verts"], m["dirs"], m["blocks"], m["aos"],
                 [n for _, n in m["palette"]], models=m.get("models"), pack=pack,
-                biome=bio, light=self.p.light))
+                biome=bio, light=self.p.light,
+                light_prop=self.p.emission_prop,
+                light_keyword=self.p.emission_keyword))
             offs.append((16.0 * dx, float(m.get("yBottom", self.p.ymin) - self.p.ymin),
                          16.0 * dz))
         if g == 1:

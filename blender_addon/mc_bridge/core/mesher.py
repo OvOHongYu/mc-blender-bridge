@@ -609,13 +609,14 @@ def _model_cells(verts16, dirs):
 
 
 def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
-                    biome=None, light=None):
+                    biome=None, light=None, light_prop=True, light_keyword=True):
     """完整方块数组 + 可选烘焙模型 -> 导入器几何字典。
 
     mats 为材质描述符列表:
       ("block", 方块名, facegrp, 叠加层[, glow]) —— 完整方块按面组取贴图
       ("tex",   texId[, glow])                  —— 烘焙模型按贴图 id 取贴图
-    glow 为该方块状态的原版亮度（0..15，blocks.light_of；0 时省略），
+    glow 为该方块状态的发光亮度（0..15；light_prop=亮度属性策略、
+    light_keyword=ID 关键词策略，见 blocks.emission_light；0 时省略），
     材质侧据此追加 Emission 节点（R6 发光方块）。同一贴图被多个模型面共用时
     取其面的最大亮度（火把/灯笼这类非整方块模型的发光在模型路径下发）。
     """
@@ -627,7 +628,8 @@ def geo_from_arrays(verts, dirs, blocks_, aos, palette, models=None, pack=None,
                 "uv": np.zeros((0, 2), np.float32), "vcol": np.zeros((0, 4), np.uint8),
                 "mat_idx": np.zeros(0, np.uint16), "mats": [], "tris": 0}
     # 逐 palette 状态算一次亮度（light=/api/blocks 表优先，回退内置原版表）
-    glows = [B.light_of(n, light) for n in palette]
+    glows = [B.emission_light(n, light, light_prop, light_keyword)
+             for n in palette]
 
     parts = []          # (verts, uv, vcol, inv, mats)
     if nq:

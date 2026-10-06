@@ -47,7 +47,9 @@ def connect_save(p):
         inflight=p.inflight,
         use_models=getattr(p, "use_models", True),
         biome_tint=getattr(p, "biome_tint", True),
-        version_interval=p.version_poll))
+        version_interval=p.version_poll,
+        emission_prop=getattr(p, "emission_prop", True),
+        emission_keyword=getattr(p, "emission_keyword", True)))
     state.set_runtime(client, scheduler,
                       client.ping(), client.blocks())
     _remember(client, world)

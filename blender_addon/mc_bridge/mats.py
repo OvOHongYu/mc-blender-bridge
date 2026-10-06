@@ -28,10 +28,34 @@ _emission_scale = 4.0
 # 改进自发光：发光颜色先过 对比度(2.1) -> 饱和度(0.9)，强度系数再 ×0.175——
 # 贴图高光部分主导发光，避免原版式整块均匀泛光的"脏"观感
 _emission_improved = True
+# 总开关（关 = 不生成任何 Emission 节点）与筛选策略（R6 三条用户反馈）
+_emission_on = True
+_emission_prop = True        # 按亮度属性（lights 表/内置表，逐状态精确）
+_emission_keyword = True     # 按英文 ID 关键词（模组"灯"类兜底，满亮度）
 
 _IMPROVED_CONTRAST = 2.1
 _IMPROVED_SATURATION = 0.9
 _IMPROVED_STRENGTH = 0.175
+
+
+def set_emission_switch(on):
+    """自发光总开关：变更时重建全部 MCB_ 材质（节点拓扑不同）。"""
+    global _emission_on
+    on = bool(on)
+    if on == _emission_on:
+        return
+    _emission_on = on
+    _drop_mcb_materials()
+
+
+def set_emission_strategies(by_property, by_keyword):
+    """筛选策略开关（按亮度属性 / 按ID关键词）：变更时重建材质。"""
+    global _emission_prop, _emission_keyword
+    by_property, by_keyword = bool(by_property), bool(by_keyword)
+    if by_property == _emission_prop and by_keyword == _emission_keyword:
+        return
+    _emission_prop, _emission_keyword = by_property, by_keyword
+    _drop_mcb_materials()
 
 
 def set_emission_improved(on):
@@ -92,9 +116,10 @@ def _drop_mcb_materials():
 
 
 def _glow_of(block):
-    """方块状态的发光亮度（0..15）。"""
+    """方块状态的发光亮度（0..15，按当前筛选策略）。"""
     try:
-        return B.light_of(block, _light_map)
+        return B.emission_light(block, _light_map,
+                                _emission_prop, _emission_keyword)
     except Exception:
         return 0
 
@@ -361,7 +386,7 @@ def _wire(mat, img, block, transparent=False, glow=0):
     links.new(vcol.outputs["Color"], mix.inputs["Color2"])
     links.new(mix.outputs["Color"], bsdf.inputs["Base Color"])
     surf = bsdf.outputs["BSDF"]
-    if glow > 0:
+    if glow > 0 and _emission_on:
         emi = nodes.new('ShaderNodeEmission')
         strength = glow / 15.0 * _emission_scale
         if _emission_improved:

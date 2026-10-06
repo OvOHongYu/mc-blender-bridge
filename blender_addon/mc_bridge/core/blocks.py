@@ -209,6 +209,44 @@ _LIGHT_STATEFUL = {
     "minecraft:cave_vines_plant": lambda p: 14 if p.get("berries") == "true" else 0,
 }
 
+# 16 色蜡烛 / 蜡烛蛋糕与原版蜡烛同公式（存档模式没有 /api/blocks lights 表，
+# 此前漏掉导致染色蜡烛在存档模式不自发光）
+_DYE_COLORS = ("white", "orange", "magenta", "light_blue", "yellow", "lime",
+               "pink", "gray", "light_gray", "cyan", "purple", "blue",
+               "brown", "green", "red", "black")
+for _c in _DYE_COLORS:
+    _LIGHT_STATEFUL["minecraft:%s_candle" % _c] = _LIGHT_STATEFUL["minecraft:candle"]
+    _LIGHT_STATEFUL["minecraft:%s_candle_cake" % _c] = _LIGHT_STATEFUL["minecraft:candle_cake"]
+
+
+# 关键词筛选策略（R6）：按英文 ID 的整词 token 匹配，命中按满亮度 15 发光。
+# 用于"模组方块看起来该发光但没声明 vanilla luminance"的情况；
+# 代价是少量误伤（未点亮的红石灯/火珊瑚等也会发光），故做成可开关策略。
+_KEYWORD_GLOW_TOKENS = {"lamp", "candle", "lantern", "torch", "glow", "glowstone",
+                        "fire", "campfire", "lava", "magma", "beacon", "portal",
+                        "shroomlight", "froglight", "conduit"}
+
+
+def keyword_light(name):
+    """ID 关键词策略：命中关键词 token 返回满亮度 15，否则 0。"""
+    import re
+    tokens = set(re.split(r"[^a-z0-9]+", base_name(name).lower())) - {""}
+    return 15 if tokens & _KEYWORD_GLOW_TOKENS else 0
+
+
+def emission_light(name, light_map=None, by_property=True, by_keyword=True):
+    """综合两种筛选策略的发光亮度（0..15）。
+
+    by_property: 按方块亮度属性（lights 表/内置表，逐状态精确）；
+    by_keyword: 按英文 ID 关键词（模组"灯"类方块的兜底，满亮度 15）。
+    两者都开时取较大值。"""
+    lum = light_of(name, light_map) if by_property else 0
+    if by_keyword:
+        kw = keyword_light(name)
+        if kw > lum:
+            lum = kw
+    return lum if lum <= 15 else 15
+
 
 def light_of(name, light_map=None):
     """方块状态的发光亮度（原版 luminance，0..15）。用于 Emission 强度。
