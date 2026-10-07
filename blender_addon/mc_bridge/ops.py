@@ -186,19 +186,37 @@ _LIST_SYNC = {}
 
 
 def _obj_group_key(obj, group):
-    """MCB_ 对象上的 mcb_key 自定义属性 -> 区块组键；非区块对象返回 None。"""
+    """MCB_ 对象上的 mcb_key 自定义属性 -> 区块组键；非区块对象返回 None。
+
+    注意：真实 Blender 把存入的 dict 转成 IDPropertyGroup（不是 dict 的
+    子类），因此不能用 isinstance 判断，走 .get()/[] 双通道兼容。"""
     try:
         mk = obj["mcb_key"]
     except Exception:
         return None
-    if not isinstance(mk, dict):
+    if not mk:
         return None
+
+    def _get(name):
+        try:
+            return mk.get(name)
+        except Exception:
+            pass
+        try:
+            return mk[name]
+        except Exception:
+            return None
+
     try:
-        cx, cz = int(mk.get("cx")), int(mk.get("cz"))
+        dim = str(_get("dim") or "")
+        cx = int(_get("cx"))
+        cz = int(_get("cz"))
     except (TypeError, ValueError):
         return None
+    if not dim:
+        return None
     g = max(1, int(group or 1))
-    return (str(mk.get("dim", "")), cx // g * g, cz // g * g)
+    return (dim, cx // g * g, cz // g * g)
 
 
 def _selected_group_keys(context, p):
@@ -527,10 +545,12 @@ class MCB_OT_refresh(bpy.types.Operator):
         if sch is None:
             self.report({'ERROR'}, "先连接")
             return {'CANCELLED'}
-        # R10：存档模式先失效 payload/网格缓存，否则刷新拿到旧数据
+        # R10：失效缓存——存档模式清解析/网格缓存，控制模式清 payload
+        # 缓存（否则刷新/重载拿到旧数据，"有刷新迹象但内容不变"）
         client = state.client()
         if client is not None and hasattr(client, "invalidate"):
             client.invalidate()
+        sch.store.clear()
         with sch.lock:
             keys = [k for k, st in sch.state.items() if st["status"] in ("LIVE", "READY")]
             for k in keys:

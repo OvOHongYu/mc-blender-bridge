@@ -118,6 +118,16 @@ class ChunkStore:
             while len(self._d) > self.cap:
                 self._d.popitem(last=False)
 
+    def pop(self, key):
+        """R10：移除单个缓存条目（版本变更的区块必须重新拉取，
+        否则重排队后 get_or_fetch 命中旧数据——"刷新了但没变化"）。"""
+        with self.lock:
+            self._d.pop(key, None)
+
+    def clear(self):
+        with self.lock:
+            self._d.clear()
+
     def __len__(self):
         with self.lock:
             return len(self._d)
@@ -521,6 +531,13 @@ class Scheduler:
                         st["gen"] += 1
                         st["status"] = QUEUED
                         self._push(self._group_dist(key[1], key[2]), key)
+                        # 组内区块的 payload 缓存必须失效——否则重排队后
+                        # 本地网格路径 get_or_fetch 命中旧数据，
+                        # 表现为"有刷新迹象但内容不变"（R10 实机反馈）
+                        for i in range(g):
+                            for j in range(g):
+                                self.store.pop((self.p.dim,
+                                                key[1] + i, key[2] + j))
         except Exception as e:
             self.log("version poll error", e)
         finally:
@@ -545,6 +562,11 @@ class Scheduler:
                     s["gen"] += 1
                     s["status"] = QUEUED
                     self._push(self._group_dist(key[1], key[2]), key)
+                # 组内 payload 缓存一并失效（与版本路径同理）
+                for (dim, cx, cz) in list(self.state.keys()):
+                    for i in range(self.p.group):
+                        for j in range(self.p.group):
+                            self.store.pop((self.p.dim, cx + i, cz + j))
         except Exception as e:
             self.log("save stamp error", e)
         finally:

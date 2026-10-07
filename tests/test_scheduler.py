@@ -371,5 +371,35 @@ class TestScheduler(unittest.TestCase):
         sch.stop()
 
 
+    def test_version_reload_raw_updates_content(self):
+        """R10 回归（实机反馈）：本地网格路径下版本变更必须失效 payload
+        缓存并重新拉取——否则"有刷新迹象但内容不变"。"""
+        sch = self._scheduler(mode="raw", r_load=2, r_unload=3)
+        imp = FakeImporter()
+        sch.update_anchor(8.0, 8.0)
+        self.assertTrue(imp.apply(sch))
+        key = ("overworld", 0, 0)
+        g = sch.p.group
+        store_keys = [(sch.p.dim, key[1] + i, key[2] + j)
+                      for i in range(g) for j in range(g)]
+        self.assertTrue(all(sch.store.get(k) is not None for k in store_keys),
+                        "首载后组内区块应有 payload 缓存")
+        # 建立版本基线 -> 改世界 -> 轮询
+        sch.maybe_poll_versions(force=True)
+        self._wait_poll(sch)
+        for x in range(8, 12):
+            for z in range(8, 12):
+                for y in (80, 81, 82):
+                    self.world.setblock(x, y, z, "minecraft:stone")
+        sch.maybe_poll_versions(force=True)
+        self._wait_poll(sch)
+        self.assertEqual(sch.state[key]["status"], "QUEUED")
+        self.assertTrue(all(sch.store.get(k) is None for k in store_keys),
+                        "版本变更后组内 payload 缓存应已失效")
+        self.assertTrue(imp.apply(sch))
+        self.assertEqual(sch.state[key]["status"], "LIVE")
+        sch.stop()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

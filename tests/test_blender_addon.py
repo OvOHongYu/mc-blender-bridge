@@ -248,6 +248,7 @@ class TestAddonSmoke(unittest.TestCase):
         """R11：名单操作符 + 同步 + 卸载全部后常见区块自动拉回。"""
         p = self._p()
         self._set_props(p)
+        p.pinned_chunks = ""
         ok, _ = self.ops.connect(p)
         self.assertTrue(ok)
         sch = self.state.scheduler()
@@ -322,6 +323,34 @@ class TestAddonSmoke(unittest.TestCase):
         self.assertEqual(sch.update_blacklist, set())
         self.ops.disconnect(p)
         self.importer.unload_all()
+
+    def test_list_manage_idprop_group(self):
+        """R10 回归（实机反馈）：真实 Blender 的自定义属性 dict 会被转成
+        IDPropertyGroup（不是 dict 子类），名单收集必须兼容。"""
+        p = self._p()
+        self._set_props(p)
+        ok, _ = self.ops.connect(p)
+        self.assertTrue(ok)
+
+        class _IDGroup:      # 模拟 IDPropertyGroup：有 .get，但不是 dict
+            def __init__(self, d):
+                self._d = d
+
+            def get(self, k, default=None):
+                return self._d.get(k, default)
+
+        o = bpy.data.objects.new("MCB_ow_2_0")
+        o["mcb_key"] = _IDGroup({"dim": "overworld", "cx": 2, "cz": 0})
+        g = self.ops._obj_group_key(o, int(p.group))
+        self.assertEqual(g, ("overworld", 2, 0))
+        bpy.context.selected_objects = [o]
+        ret = fake_bpy.call_operator("mcb.list_manage", bpy.context,
+                                     list_kind='pinned', action='add')
+        self.assertEqual(ret, {'FINISHED'})
+        self.assertIn("overworld:2,0", p.pinned_chunks)
+        self.ops.disconnect(p)
+        self.importer.unload_all()
+        p.pinned_chunks = ""               # 场景属性跨测试持久，避免污染
 
     # ------------------------------------------------------------ 材质 ----
     def test_material_placeholder_and_texture(self):
