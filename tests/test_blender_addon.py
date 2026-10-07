@@ -292,6 +292,37 @@ class TestAddonSmoke(unittest.TestCase):
         self.ops.disconnect(p)
         self.importer.unload_all()
 
+    def test_list_manage_update_lists(self):
+        """R10：更新白/黑名单操作符 + 同步进调度器。"""
+        p = self._p()
+        self._set_props(p)
+        ok, _ = self.ops.connect(p)
+        self.assertTrue(ok)
+        o = bpy.data.objects.new("MCB_ow_0_0")
+        o["mcb_key"] = {"dim": "overworld", "cx": 0, "cz": 0}
+        bpy.context.selected_objects = [o]
+        fake_bpy.call_operator("mcb.list_manage", bpy.context,
+                               list_kind='whitelist', action='add')
+        self.assertIn("overworld:0,0", p.update_whitelist)
+        fake_bpy.call_operator("mcb.list_manage", bpy.context,
+                               list_kind='blacklist', action='add')
+        self.assertIn("overworld:0,0", p.update_blacklist)
+        self.ops._sync_lists(p)
+        sch = self.state.scheduler()
+        self.assertIn(("overworld", 0, 0), sch.update_whitelist)
+        self.assertIn(("overworld", 0, 0), sch.update_blacklist)
+        fake_bpy.call_operator("mcb.list_manage", bpy.context,
+                               list_kind='whitelist', action='remove')
+        self.assertEqual(p.update_whitelist, "")
+        fake_bpy.call_operator("mcb.list_manage", bpy.context,
+                               list_kind='blacklist', action='clear')
+        self.assertEqual(p.update_blacklist, "")
+        self.ops._sync_lists(p)
+        self.assertEqual(sch.update_whitelist, set())
+        self.assertEqual(sch.update_blacklist, set())
+        self.ops.disconnect(p)
+        self.importer.unload_all()
+
     # ------------------------------------------------------------ 材质 ----
     def test_material_placeholder_and_texture(self):
         client = None

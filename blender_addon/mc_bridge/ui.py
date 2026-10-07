@@ -82,6 +82,9 @@ class MCB_PT_panel(bpy.types.Panel):
         col.prop(p, "leaves")
         col.prop(p, "distance_first")
         row = box.row(align=True)
+        row.prop(p, "auto_update", icon='FILE_REFRESH')
+        row.prop(p, "update_event", icon='LIGHTNING')
+        row = box.row(align=True)
         row.prop(p, "ymin")
         row.prop(p, "ymax")
         row = box.row(align=True)
@@ -102,6 +105,26 @@ class MCB_PT_panel(bpy.types.Panel):
             box.label(text="常见区块 %d 组（不主动卸载）" % n_pin, icon='PINNED')
             opc = box.operator("mcb.list_manage", text="清空常见区块")
             opc.list_kind, opc.action = 'pinned', 'clear'
+        # 更新白/黑名单（R10）
+        row = box.row(align=True)
+        opw = row.operator("mcb.list_manage", text="白名单+", icon='CHECKMARK')
+        opw.list_kind, opw.action = 'whitelist', 'add'
+        opwr = row.operator("mcb.list_manage", text="", icon='X')
+        opwr.list_kind, opwr.action = 'whitelist', 'remove'
+        opb = row.operator("mcb.list_manage", text="黑名单+", icon='CANCEL')
+        opb.list_kind, opb.action = 'blacklist', 'add'
+        opbr = row.operator("mcb.list_manage", text="", icon='X')
+        opbr.list_kind, opbr.action = 'blacklist', 'remove'
+        n_wl = len(parse_group_list(p.update_whitelist))
+        n_bl = len(parse_group_list(p.update_blacklist))
+        if n_wl or n_bl:
+            box.label(text="白名单 %d 组 · 黑名单 %d 组（永不自动更新）"
+                           % (n_wl, n_bl), icon='FILTER')
+            row = box.row(align=True)
+            opcw = row.operator("mcb.list_manage", text="清空白名单")
+            opcw.list_kind, opcw.action = 'whitelist', 'clear'
+            opcb = row.operator("mcb.list_manage", text="清空黑名单")
+            opcb.list_kind, opcb.action = 'blacklist', 'clear'
 
         box = lay.box()
         box.label(text="资产包（原版贴图 / 模型）")

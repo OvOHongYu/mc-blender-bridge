@@ -274,6 +274,102 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(sch.ensure_pinned(), 0)
         sch.stop()
 
+    # ------------------------------------------------------------ R10 ----
+    class _RevClient:
+        """带世界修订号的假客户端：验证事件驱动门控。"""
+
+        def __init__(self, rev=5):
+            self.rev = rev
+            self.versions_calls = 0
+
+        def world_rev(self):
+            return self.rev
+
+        def versions(self, dim, x0, z0, x1, z1):
+            self.versions_calls += 1
+            return {(cx, cz): 1 for cx in range(x0, x1 + 1)
+                    for cz in range(z0, z1 + 1)}
+
+    def _live(self, sch, gxs=(0,), version=None):
+        with sch.lock:
+            for gx in gxs:
+                key = ("overworld", gx, 0)
+                sch.state[key] = {"status": "LIVE", "gen": 0,
+                                  "last_seen": sch.time(),
+                                  "version": version}
+
+    def _wait_poll(self, sch, timeout=5):
+        deadline = time.time() + timeout
+        while sch._version_polling and time.time() < deadline:
+            time.sleep(0.02)
+
+    def test_world_rev_gate(self):
+        """R10：修订号未变跳过逐组扫描，变化后扫描并重载改动组。"""
+        client = self._RevClient()
+        sch = self.Scheduler(client, self.Params(r_load=2, r_unload=3))
+        self._live(sch, version=(1,) * (sch.p.group ** 2))
+        sch._poll_versions(list(sch.state))      # 首查建立基线
+        self.assertEqual(client.versions_calls, 1)
+        sch._poll_versions(list(sch.state))      # rev 未变 -> 门控跳过
+        self.assertEqual(client.versions_calls, 1)
+        client.rev += 1                          # 世界变了
+        sch._poll_versions(list(sch.state))
+        self.assertEqual(client.versions_calls, 2)
+        sch.stop()
+
+    def test_rev_fallback_on_old_mod(self):
+        """R10：旧模组无 /api/worldrev -> 404 后回退常规轮询，不抛异常。"""
+        class OldClient:
+            def versions(self, dim, x0, z0, x1, z1):
+                return {(cx, cz): 1 for cx in range(x0, x1 + 1)
+                        for cz in range(z0, z1 + 1)}
+        sch = self.Scheduler(OldClient(), self.Params())
+        self._live(sch, version=(1,) * (sch.p.group ** 2))
+        sch._poll_versions(list(sch.state))
+        self.assertFalse(sch._rev_ok)
+        self.assertEqual(sch.state[("overworld", 0, 0)]["status"], "LIVE")
+        sch.stop()
+
+    def test_update_lists_semantics(self):
+        """R10：总开关 / 白名单 / 黑名单（黑优先）的过滤语义。"""
+        sch = self._scheduler(auto_update=False)
+        k0, k4 = ("overworld", 0, 0), ("overworld", 4, 0)
+        # 总开关关：全部不更新
+        self.assertFalse(sch._updatable(k0))
+        self.assertFalse(sch._updatable(k4))
+        # 白名单：强制更新
+        sch.set_update_whitelist([k0])
+        self.assertTrue(sch._updatable(k0))
+        self.assertFalse(sch._updatable(k4))
+        # 黑名单优先于白名单
+        sch.set_update_blacklist([k0])
+        self.assertFalse(sch._updatable(k0))
+        # 总开关开时黑名单仍拦截
+        sch.p.auto_update = True
+        self.assertFalse(sch._updatable(k0))
+        self.assertTrue(sch._updatable(k4))
+        sch.stop()
+
+    def test_save_stamp_reload(self):
+        """R10 存档：变更戳变化 -> 清缓存 + LIVE 重扫（首查只建基线）。"""
+        stamps = {"v": 1.0}
+        invalidated = {"n": 0}
+        sch = self.Scheduler(self._RevClient(), self.Params(
+            world_stamp_fn=lambda: stamps["v"],
+            invalidate_fn=lambda: invalidated.__setitem__(
+                "n", invalidated["n"] + 1)))
+        self._live(sch, (0,))
+        self.assertTrue(sch.maybe_poll_versions())
+        self._wait_poll(sch)
+        self.assertEqual(invalidated["n"], 0)
+        self.assertEqual(sch.state[("overworld", 0, 0)]["status"], "LIVE")
+        stamps["v"] = 2.0                         # 存档被外部更新
+        self.assertTrue(sch.maybe_poll_versions(force=True))
+        self._wait_poll(sch)
+        self.assertEqual(invalidated["n"], 1, "变更后应先失效缓存")
+        self.assertEqual(sch.state[("overworld", 0, 0)]["status"], "QUEUED")
+        sch.stop()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

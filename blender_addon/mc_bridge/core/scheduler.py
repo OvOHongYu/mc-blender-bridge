@@ -48,6 +48,11 @@ class Params:
         # R9 按摄像机距离优先：锚点移动时重排队列、ready 按距离应用。
         # 派发保持并行（inflight 全填满）——串行化会造成队头阻塞，明确不做。
         self.distance_first = bool(kw.get("distance_first", True))
+        # R10 更新策略：总开关 / 事件驱动（控制模式）/ 存档变更戳钩子
+        self.auto_update = bool(kw.get("auto_update", True))
+        self.update_event = bool(kw.get("update_event", True))
+        self.world_stamp_fn = kw.get("world_stamp_fn")    # 存档模式：变更戳
+        self.invalidate_fn = kw.get("invalidate_fn")      # 存档模式：清缓存
 
     def as_dict(self):
         return dict(dim=self.dim, r_load=self.r_load, r_unload=self.r_unload,
@@ -147,6 +152,13 @@ class Scheduler:
         self._anchor_group = None       # R9：上次 tick 的锚点组（跨组移动触发重排）
         self.frozen = False             # 预热/烘焙期间禁止卸载
         self.pinned = set()             # R11：常见区块（组键），不参与迟滞卸载
+        self.update_whitelist = set()   # R10：强制更新（总开关关闭也更新）
+        self.update_blacklist = set()   # R10：永不自动更新
+        self._world_rev = None          # R10：上次看到的世界修订号
+        self._rev_ok = True             # R10：模组支持 /api/worldrev（404 后回退）
+        self._last_stamp = None         # R10：上次存档变更戳
+        self._world_stamp_fn = self.p.world_stamp_fn
+        self._invalidate_fn = self.p.invalidate_fn
         self.last_version_poll = -1e9
         self._version_polling = False
         self.stats = {"applied": 0, "evicted": 0, "errors": 0, "tris": 0,
@@ -422,24 +434,73 @@ class Scheduler:
         return out
 
     # ------------------------------------------------------------ 版本 ----
+    def _updatable(self, key):
+        """R10：该组是否参与自动更新（黑名单优先；白名单无视总开关）。"""
+        if key in self.update_blacklist:
+            return False
+        if key in self.update_whitelist:
+            return True
+        return self.p.auto_update
+
+    def set_update_lists(self, whitelist, blacklist):
+        """R10：设置更新白/黑名单（组键集合）。"""
+        self.update_whitelist = set(whitelist or ())
+        self.update_blacklist = set(blacklist or ())
+
+    def set_update_whitelist(self, keys):
+        self.update_whitelist = set(keys or ())
+
+    def set_update_blacklist(self, keys):
+        self.update_blacklist = set(keys or ())
+
     def maybe_poll_versions(self, force=False):
-        """主线程定期调用；异步检查 LIVE 区块版本。"""
+        """主线程定期调用；异步检查 LIVE 区块版本。
+
+        R10：总开关关闭时只更新白名单组；存档模式走变更戳
+        （world_stamp_fn），控制模式走修订号/逐组版本。"""
         if self._version_polling:
             return False
         t = self.time()
         if not force and (t - self.last_version_poll) < self.p.version_interval:
             return False
-        self.last_version_poll = t
         with self.lock:
-            live = [k for k, st in self.state.items() if st["status"] == LIVE]
-        if not live:
+            live = [k for k, st in self.state.items()
+                    if st["status"] == LIVE and self._updatable(k)]
+        if not live and self._world_stamp_fn is None:
             return False
+        self.last_version_poll = t
         self._version_polling = True
-        self.executor.submit(self._poll_versions, live)
+        if self._world_stamp_fn is not None:
+            self.executor.submit(self._poll_save_stamp)
+        else:
+            self.executor.submit(self._poll_versions, live)
         return True
+
+    def _fetch_world_rev(self):
+        """GET /api/worldrev（R10 事件驱动）；旧模组 404 -> 永久回退常规轮询。"""
+        try:
+            return self.client.world_rev()
+        except AttributeError:
+            self._rev_ok = False            # 客户端根本没有该方法
+            return None
+        except Exception as e:
+            status = getattr(e, "status", None)
+            if status == 404 or "404" in str(e):
+                self._rev_ok = False
+            else:
+                self.log("worldrev error", e)
+            return None
 
     def _poll_versions(self, keys):
         try:
+            # R10 事件驱动：修订号未变则跳过逐组扫描（首查建立基线）
+            if self.p.update_event and self._rev_ok:
+                rev = self._fetch_world_rev()
+                if rev is not None and self._world_rev is not None \
+                        and rev == self._world_rev:
+                    return
+                if rev is not None:
+                    self._world_rev = rev
             g = self.p.group
             cxs = [k[1] for k in keys]
             czs = [k[2] for k in keys]
@@ -462,6 +523,30 @@ class Scheduler:
                         self._push(self._group_dist(key[1], key[2]), key)
         except Exception as e:
             self.log("version poll error", e)
+        finally:
+            self._version_polling = False
+
+    def _poll_save_stamp(self):
+        """R10 存档模式：变更戳变化 -> 清缓存并重扫全部受管 LIVE 组。
+
+        首次轮询只建立基线不重载；黑名单组跳过，总开关关闭时仅白名单组。"""
+        try:
+            st = self._world_stamp_fn()
+            changed = self._last_stamp is not None and st != self._last_stamp
+            self._last_stamp = st
+            if not changed:
+                return
+            if self._invalidate_fn is not None:
+                self._invalidate_fn()
+            with self.lock:
+                for key, s in list(self.state.items()):
+                    if s["status"] != LIVE or not self._updatable(key):
+                        continue
+                    s["gen"] += 1
+                    s["status"] = QUEUED
+                    self._push(self._group_dist(key[1], key[2]), key)
+        except Exception as e:
+            self.log("save stamp error", e)
         finally:
             self._version_polling = False
 

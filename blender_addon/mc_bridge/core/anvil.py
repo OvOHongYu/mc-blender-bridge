@@ -408,6 +408,39 @@ class AnvilWorld:
             self._payloads.clear()
             self._entities.clear()
 
+    # ------------------------------------------------------------ R10 ----
+    def world_stamp(self):
+        """存档变更戳（R10）：全部 .mca 的 mtime+size 之和。
+
+        region/entities 文件被外部（游戏存档）更新时变化；目录扫描
+        O(文件数)，几十个文件，微秒级——供低频轮询比对。"""
+        stamp = 0.0
+        for sub in ("", "DIM-1", "DIM1"):
+            base = os.path.join(self.save_root, sub) if sub else self.save_root
+            for kind in ("region", "entities"):
+                d = os.path.join(base, kind)
+                try:
+                    for name in os.listdir(d):
+                        if not name.endswith(".mca"):
+                            continue
+                        st = os.stat(os.path.join(d, name))
+                        stamp += st.st_mtime + st.st_size
+                except OSError:
+                    pass
+        return stamp
+
+    def invalidate(self):
+        """清全部解析缓存（R10：存档被外部更新后重扫）。
+
+        region 句柄一并重开——MC 重定位区块会改写偏移表，旧句柄的
+        偏移表已过期。"""
+        with self.lock:
+            for reg in self._regions.values():
+                reg.close()
+            self._regions.clear()
+            self._payloads.clear()
+            self._entities.clear()
+
     # ------------------------------------------------------------ 区块 ----
     def _clip(self, dim, ymin, ymax):
         dim = norm_dim(dim)
@@ -605,8 +638,18 @@ class SaveClient:
         return out
 
     def versions(self, dim, cx0, cz0, cx1, cz1):
-        # 存档为静态数据：版本恒 0，不触发重载
+        # 存档为静态数据：版本恒 0，不触发重载（自动更新走 world_stamp，R10）
         return {(cx, cz): 0 for cx in range(cx0, cx1 + 1) for cz in range(cz0, cz1 + 1)}
+
+    def world_stamp(self):
+        """存档变更戳（R10 自动更新：文件被外部改动时变化）。"""
+        return self.world.world_stamp()
+
+    def invalidate(self):
+        """清存档解析/网格缓存（手动刷新或变更戳变化时调用）。"""
+        self.world.invalidate()
+        with self.world.lock:
+            self._mesh_cache.clear()
 
     def texture_png(self, block, face):
         return procedural_png(block, face)

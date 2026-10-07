@@ -50,7 +50,10 @@ def connect_save(p):
         version_interval=p.version_poll,
         emission_prop=getattr(p, "emission_prop", True),
         emission_keyword=getattr(p, "emission_keyword", True),
-        distance_first=getattr(p, "distance_first", True)))
+        distance_first=getattr(p, "distance_first", True),
+        auto_update=getattr(p, "auto_update", True),
+        world_stamp_fn=client.world_stamp,
+        invalidate_fn=client.invalidate))
     state.set_runtime(client, scheduler,
                       client.ping(), client.blocks())
     _remember(client, world)

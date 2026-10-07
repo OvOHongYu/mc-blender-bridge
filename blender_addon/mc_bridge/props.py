@@ -41,6 +41,10 @@ _defaults = {
     "distance_first": True,
     "pinned_chunks": "",
     "auto_preload": True,
+    "auto_update": True,
+    "update_event": True,
+    "update_whitelist": "",
+    "update_blacklist": "",
 }
 
 
@@ -112,6 +116,25 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                          default=_defaults["auto_preload"],
                                          description="连接后（以及「卸载全部」后）自动加载全部"
                                                      "常见区块，无论距离")
+    auto_update: bpy.props.BoolProperty(name="自动更新",
+                                        default=_defaults["auto_update"],
+                                        description="游戏/存档里的方块改动自动重载受影响区块"
+                                                    "（R10）。关闭后仅更新白名单区块")
+    update_event: bpy.props.BoolProperty(name="事件驱动更新",
+                                         default=_defaults["update_event"],
+                                         description="轮询模组的世界修订号（任一方块变更才 +1）："
+                                                     "无改动零开销，有改动即时扫描。需要配套"
+                                                     "新版模组（/api/worldrev），旧模组自动回退"
+                                                     "常规轮询")
+    update_whitelist: bpy.props.StringProperty(name="更新白名单",
+                                               default=_defaults["update_whitelist"],
+                                               description="强制更新的区块组：自动更新关闭也照常更新"
+                                                           "（边拍边改的舞台区）。用「选中加入」添加")
+    update_blacklist: bpy.props.StringProperty(name="更新黑名单",
+                                               default=_defaults["update_blacklist"],
+                                               description="永不自动更新的区块组：防止大背景区被无关"
+                                                           "改动（掉落沙/水流等）反复重载。冲突时黑名单"
+                                                           "优先于白名单")
     sync_player: bpy.props.BoolProperty(name="玩家跟随相机", default=_defaults["sync_player"],
                                         description="把 MC 玩家实时传送到 Blender 相机的位置与朝向"
                                                     "（需要模组 /api/player 支持）")

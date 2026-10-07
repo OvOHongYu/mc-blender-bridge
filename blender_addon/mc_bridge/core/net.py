@@ -121,6 +121,16 @@ class ApiClient:
                            {"dim": dim, "cx0": cx0, "cz0": cz0, "cx1": cx1, "cz1": cz1})
         return codec.decode_versions(buf)
 
+    def world_rev(self):
+        """全局世界修订号（R10 事件驱动，模组 >= 1.4.1）。
+
+        任一方块变更 +1；无变更时插件跳过逐组版本扫描。
+        旧模组 404 -> 调度器自动回退常规轮询。"""
+        status, _, data = self._request("/api/worldrev")
+        if status != 200:
+            raise ApiError(f"worldrev -> {status}", status)
+        return int(json.loads(data).get("rev") or 0)
+
     def entities(self, dim, cx, cz, ymin=-64, ymax=320):
         """区块内实体列表（R5）：{entities: [{id, Pos, ...}]}；JSON。"""
         status, _, data = self._request(

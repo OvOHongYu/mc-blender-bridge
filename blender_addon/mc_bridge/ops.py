@@ -35,7 +35,9 @@ def connect(p):
         light=(blocks.get("lights") if isinstance(blocks, dict) else None),
         emission_prop=getattr(p, "emission_prop", True),
         emission_keyword=getattr(p, "emission_keyword", True),
-        distance_first=getattr(p, "distance_first", True)))
+        distance_first=getattr(p, "distance_first", True),
+        auto_update=getattr(p, "auto_update", True),
+        update_event=getattr(p, "update_event", True)))
     state.set_runtime(client, scheduler, info, blocks)
     mats.set_light_map(blocks.get("lights") if isinstance(blocks, dict) else None)
     p.status = "已连接 %s (MC %s)" % (info.get("mod", "?"), info.get("mcVersion", "?"))
@@ -215,7 +217,9 @@ def _sync_lists(p):
     if sch is None:
         _LIST_SYNC.clear()
         return
-    for prop, setter in (("pinned_chunks", sch.set_pinned),):
+    for prop, setter in (("pinned_chunks", sch.set_pinned),
+                         ("update_whitelist", sch.set_update_whitelist),
+                         ("update_blacklist", sch.set_update_blacklist)):
         s = getattr(p, prop, "") or ""
         if _LIST_SYNC.get(prop) != (id(sch), s):
             _LIST_SYNC[prop] = (id(sch), s)
@@ -516,13 +520,17 @@ class MCB_OT_bake(bpy.types.Operator):
 class MCB_OT_refresh(bpy.types.Operator):
     bl_idname = "mcb.refresh"
     bl_label = "立即刷新"
-    bl_description = "强制重新入队当前 LIVE 区块（世界有改动时用）"
+    bl_description = "强制重新入队当前 LIVE 区块（世界有改动时用；存档模式会先清缓存）"
 
     def execute(self, context):
         sch = state.scheduler()
         if sch is None:
             self.report({'ERROR'}, "先连接")
             return {'CANCELLED'}
+        # R10：存档模式先失效 payload/网格缓存，否则刷新拿到旧数据
+        client = state.client()
+        if client is not None and hasattr(client, "invalidate"):
+            client.invalidate()
         with sch.lock:
             keys = [k for k, st in sch.state.items() if st["status"] in ("LIVE", "READY")]
             for k in keys:

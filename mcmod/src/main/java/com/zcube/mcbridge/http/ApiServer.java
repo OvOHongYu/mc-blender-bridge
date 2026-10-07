@@ -73,6 +73,7 @@ public final class ApiServer {
                 case "/api/mesh" -> mesh(ex, q);
                 case "/api/entities" -> entities(ex, q);
                 case "/api/versions" -> versions(ex, q);
+                case "/api/worldrev" -> worldrev(ex);
                 case "/api/texture" -> texture(ex, q);
                 default -> json(ex, 404, "{\"error\":\"not found\"}");
             }
@@ -261,6 +262,12 @@ public final class ApiServer {
             }
         }
         binary(ex, 200, zlib(out.toByteArray()), "application/octet-stream", 2);
+    }
+
+    /** R10 事件驱动：全局世界修订号（任一方块变更 +1）。
+     *  插件轮询此单整数（开销≈0），变更才做逐组版本扫描。 */
+    private void worldrev(HttpExchange ex) throws IOException {
+        json(ex, 200, "{\"rev\":" + VersionTracker.worldRev() + "}");
     }
 
     private void texture(HttpExchange ex, Query q) throws IOException {
