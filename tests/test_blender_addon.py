@@ -352,6 +352,52 @@ class TestAddonSmoke(unittest.TestCase):
         self.importer.unload_all()
         p.pinned_chunks = ""               # 场景属性跨测试持久，避免污染
 
+    def test_runtime_update_switches_hot_sync(self):
+        """R10 实机反馈：面板开关在连接后变更必须热同步进调度器——
+        否则"关掉自动更新/事件驱动后仍继续更新"（Params 只在 connect
+        时构造一次，之后从不回读）。"""
+        p = self._p()
+        self._set_props(p)
+        p.auto_update = True
+        p.update_event = True
+        p.pinned_chunks = ""
+        p.update_whitelist = ""
+        p.update_blacklist = ""
+        ok, _ = self.ops.connect(p)
+        self.assertTrue(ok)
+        sch = self.state.scheduler()
+        import fake_bpy as _fb
+        cam = bpy.data.objects.new("CameraU")
+        self._scene().camera = cam
+        cam._matrix_world.translation = _fb._Vec3(8.0, 8.0, 8.0)
+        for _ in range(200):
+            self.ops.step_tick(p, self._scene())
+            if sch.counts().get("LIVE") and not sch.queue \
+                    and not sch.inflight_keys:
+                break
+            time.sleep(0.02)
+        self.assertTrue(sch.counts().get("LIVE"), "应有 LIVE 组")
+
+        def _idle(timeout=5):
+            deadline = time.time() + timeout
+            while sch._version_polling and time.time() < deadline:
+                time.sleep(0.02)
+
+        _idle()
+        self.assertTrue(sch.maybe_poll_versions(force=True),
+                        "开关开启时应触发更新轮询")
+        _idle()
+        # 连接后关闭两个开关 -> step_tick 必须把它同步进调度器
+        p.auto_update = False
+        p.update_event = False
+        self.ops.step_tick(p, self._scene())
+        self.assertFalse(sch.p.auto_update, "面板关闭应同步进调度器")
+        self.assertFalse(sch.p.update_event, "事件驱动关闭应同步进调度器")
+        self.assertFalse(sch.maybe_poll_versions(force=True),
+                         "两个开关关闭后不应再触发更新")
+        self.ops.disconnect(p)
+        self.importer.unload_all()
+
     # ------------------------------------------------------------ 材质 ----
     def test_material_placeholder_and_texture(self):
         client = None

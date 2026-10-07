@@ -112,8 +112,9 @@ def step_tick(p, scene):
     mats.set_emission_improved(getattr(p, "emission_improved", True))
     mats.set_emission_strategies(getattr(p, "emission_prop", True),
                                  getattr(p, "emission_keyword", True))
-    # 3.5 名单同步（R11 常见区块 / R10 白黑名单）与自动预载
+    # 3.5 名单/运行时策略同步（R10/R11）与自动预载
     _sync_lists(p)
+    _sync_runtime_params(p, scheduler)
     if getattr(p, "auto_preload", True):
         scheduler.ensure_pinned()
     scheduler.maybe_poll_versions()
@@ -242,6 +243,19 @@ def _sync_lists(p):
         if _LIST_SYNC.get(prop) != (id(sch), s):
             _LIST_SYNC[prop] = (id(sch), s)
             setter(parse_group_list(s))
+
+
+def _sync_runtime_params(p, scheduler):
+    """把面板上可在连接后随时改的运行时策略同步进调度器。
+
+    `Params` 只在 connect() 时构造一次，而这些开关改完必须立即生效——
+    不同步会导致"关了自动更新仍继续更新"（实机反馈）。结构性参数
+    （模式/半径/世界裁剪/群系调色/树叶）改动仍需重连或重载区块才生效，
+    不在此列（避免半新半旧）。"""
+    sch_p = scheduler.p
+    sch_p.auto_update = bool(getattr(p, "auto_update", True))
+    sch_p.update_event = bool(getattr(p, "update_event", True))
+    sch_p.distance_first = bool(getattr(p, "distance_first", True))
 
 
 class MCB_OT_list_manage(bpy.types.Operator):
