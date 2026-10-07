@@ -83,7 +83,7 @@ class MCB_PT_panel(bpy.types.Panel):
         col.prop(p, "distance_first")
         row = box.row(align=True)
         row.prop(p, "auto_update", icon='FILE_REFRESH')
-        row.prop(p, "update_event", icon='LIGHTNING')
+        row.prop(p, "update_event", icon='AUTO')
         row = box.row(align=True)
         row.prop(p, "ymin")
         row.prop(p, "ymax")
