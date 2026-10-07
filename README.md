@@ -108,7 +108,7 @@ N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
 | `blender_addon/mc_bridge/` | Blender 插件（bpy 层 + 纯 Python 核心） | ✅ 已实现并测试 |
 | `server_sim/` | MC 模拟服务器（无 MC 环境的开发/测试替身，与模组 API 同构） | ✅ 已实现并测试 |
 | `mcmod/` | Fabric 服务端模组（Java） | ✅ 源码完整；纯 Java 部分已与 Python 逐字节对拍 |
-| `tests/` | 202 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
+| `tests/` | 223 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
 | `docs/` | 设计方案 / 协议规范 / 用户手册 / 路线图 / 预览图 | ✅ |
 | `tools/` | 资产烘焙、夹具生成、预览导出、Java 合并验证脚本 | ✅ |
 
@@ -140,10 +140,10 @@ python3 server_sim/mc_server_sim.py --port 8788
 ```bash
 # 1. 构建模组（需 JDK 17+ 与网络）
 cd mcmod && gradle build  # 需 Gradle 8.14+（或用 IDE 打开 mcmod 执行）
-# 产物: build/libs/mcbridge-1.4.0.jar
+# 产物: build/libs/mcbridge-1.5.0.jar
 
 # 2. 服务端安装（推荐独立服务端，无暂停问题；单人模式请"对局域网开放"）
-cp mcbridge-1.4.0.jar <服务端>/mods/
+cp mcbridge-1.5.0.jar <服务端>/mods/
 # 启动服务端，确认日志: "MC Bridge API 已启动: http://127.0.0.1:8788"
 
 # 3. Blender 插件连接 127.0.0.1:8788（默认端口）
@@ -152,7 +152,7 @@ cp mcbridge-1.4.0.jar <服务端>/mods/
 ## 测试
 
 ```bash
-# Python 全量（202 项：编解码/网格器/调度器/存档解析/实体与画/发光/插件冒烟/端到端/原版对拍）
+# Python 全量（223 项：编解码/网格器/调度器/存档解析/实体与画/发光/插件冒烟/端到端/原版对拍）
 python3 -m pytest tests/
 
 # 跨语言一致性（Java vs Python 夹具逐字节对拍，仅需 JRE）
@@ -238,8 +238,7 @@ python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
 
 ## 未来规划
 
-见 [docs/roadmap.md](docs/roadmap.md)——R2–R8 各条目已全部完成
-（v1.4.0：R6 发光方块、R7 CI/进度条/残留对象、R5 画定位定案）。
-新一轮规划：**R9 按摄像机距离优先加载**、**R10 区块更新策略**
-（开关/事件驱动/手动/白黑名单）、**R11 常见区块（钉选）**，
-可行性结论与方案详见该文档。
+见 [docs/roadmap.md](docs/roadmap.md)——**R2–R11 全部完成**：
+v1.4.0 落地 R6 发光方块、R7 CI/进度条/残留对象、R5 画定位定案；
+v1.5.0 落地 R9 按摄像机距离优先、R10 区块更新策略（开关 / 事件驱动 /
+手动 / 白黑名单）、R11 常见区块（钉选）。逐条实现记录见该文档。
