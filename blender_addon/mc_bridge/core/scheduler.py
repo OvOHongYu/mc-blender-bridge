@@ -51,6 +51,9 @@ class Params:
         # R10 更新策略：总开关 / 事件驱动（控制模式）/ 存档变更戳钩子
         self.auto_update = bool(kw.get("auto_update", True))
         self.update_event = bool(kw.get("update_event", True))
+        # 事件驱动的轮询间隔：只取一个整数（开销≈0），故可用亚秒级；
+        # 关闭时回退 version_interval（逐组版本扫描重得多）
+        self.event_interval = float(kw.get("event_interval", 0.5))
         self.world_stamp_fn = kw.get("world_stamp_fn")    # 存档模式：变更戳
         self.invalidate_fn = kw.get("invalidate_fn")      # 存档模式：清缓存
 
@@ -463,6 +466,17 @@ class Scheduler:
     def set_update_blacklist(self, keys):
         self.update_blacklist = set(keys or ())
 
+    def _poll_interval(self):
+        """轮询节流间隔。
+
+        事件驱动开启且模组支持修订号时用**亚秒级**（event_interval）——
+        每次只取一个整数（开销≈0），方块改动能在亚秒级被感知；
+        否则回退 version_interval（逐组版本扫描重得多）。"""
+        if (self.p.update_event and self._rev_ok
+                and self._world_stamp_fn is None):
+            return max(0.1, float(self.p.event_interval))
+        return self.p.version_interval
+
     def maybe_poll_versions(self, force=False):
         """主线程定期调用；异步检查 LIVE 区块版本。
 
@@ -471,7 +485,7 @@ class Scheduler:
         if self._version_polling:
             return False
         t = self.time()
-        if not force and (t - self.last_version_poll) < self.p.version_interval:
+        if not force and (t - self.last_version_poll) < self._poll_interval():
             return False
         with self.lock:
             live = [k for k, st in self.state.items()

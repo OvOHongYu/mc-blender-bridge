@@ -343,8 +343,10 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 
 > 实现记录：① 「自动更新」总开关（两模式）；② **事件驱动**：模组在
 > `VersionTracker.bump`（WorldChunkMixin setBlockState 钩子）同步递增
-> **全局世界修订号**，新增 `GET /api/worldrev`——插件每轮询间隔只取这一个
-> 整数，变更才做逐组版本扫描；旧模组 404/缺方法自动永久回退常规轮询；
+> **全局世界修订号**，新增 `GET /api/worldrev`——插件以 **event_interval**
+> （默认 0.5s；仅取一个整数，开销≈0）轮询，变更才做逐组版本扫描，
+> 方块改动亚秒级生效；旧模组 404/缺方法自动永久回退常规轮询
+> （version_interval，默认 5s）；
 > ③ 存档模式自动更新：`SaveClient.world_stamp()`（全部 .mca 的 mtime+size
 > 之和，微秒级）变化 → 先 `invalidate()`（清 payload/实体/网格缓存并重开
 > region 句柄，防偏移表过期）→ 重扫受管 LIVE 组；④ 白/黑名单（组级，

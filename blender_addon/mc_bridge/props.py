@@ -43,6 +43,7 @@ _defaults = {
     "auto_preload": True,
     "auto_update": True,
     "update_event": True,
+    "event_interval": 0.5,
     "update_whitelist": "",
     "update_blacklist": "",
 }
@@ -122,10 +123,19 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                                     "（R10）。关闭后仅更新白名单区块")
     update_event: bpy.props.BoolProperty(name="事件驱动更新",
                                          default=_defaults["update_event"],
-                                         description="轮询模组的世界修订号（任一方块变更才 +1）："
-                                                     "无改动零开销，有改动即时扫描。需要配套"
-                                                     "新版模组（/api/worldrev），旧模组自动回退"
-                                                     "常规轮询")
+                                         description="以亚秒级间隔轮询模组的全局世界修订号"
+                                                     "（任何方块变化 +1，只取一个整数、开销≈0），"
+                                                     "一有变化立即重载受影响区块——覆盖挖掘、放置、"
+                                                     "爆炸/活塞、作物生长、水与岩浆流动、命令 setblock "
+                                                     "等一切改变方块状态的操作（不含箱子内容之类的"
+                                                     "方块实体数据）。需要新版模组（/api/worldrev），"
+                                                     "旧模组自动回退常规轮询")
+    event_interval: bpy.props.FloatProperty(name="事件轮询间隔",
+                                            default=_defaults["event_interval"],
+                                            min=0.1, max=10.0,
+                                            description="事件驱动开启时的修订号轮询间隔（秒）。"
+                                                        "每次只请求一个整数，可设得很小以获得准实时"
+                                                        "更新；关闭事件驱动后改用「版本轮询间隔」")
     update_whitelist: bpy.props.StringProperty(name="更新白名单",
                                                default=_defaults["update_whitelist"],
                                                description="强制更新的区块组：自动更新关闭也照常更新"

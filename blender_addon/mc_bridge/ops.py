@@ -37,7 +37,8 @@ def connect(p):
         emission_keyword=getattr(p, "emission_keyword", True),
         distance_first=getattr(p, "distance_first", True),
         auto_update=getattr(p, "auto_update", True),
-        update_event=getattr(p, "update_event", True)))
+        update_event=getattr(p, "update_event", True),
+        event_interval=getattr(p, "event_interval", 0.5)))
     state.set_runtime(client, scheduler, info, blocks)
     mats.set_light_map(blocks.get("lights") if isinstance(blocks, dict) else None)
     p.status = "已连接 %s (MC %s)" % (info.get("mod", "?"), info.get("mcVersion", "?"))
@@ -255,6 +256,7 @@ def _sync_runtime_params(p, scheduler):
     sch_p = scheduler.p
     sch_p.auto_update = bool(getattr(p, "auto_update", True))
     sch_p.update_event = bool(getattr(p, "update_event", True))
+    sch_p.event_interval = float(getattr(p, "event_interval", 0.5))
     sch_p.distance_first = bool(getattr(p, "distance_first", True))
 
 

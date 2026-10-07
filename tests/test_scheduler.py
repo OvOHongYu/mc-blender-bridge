@@ -371,6 +371,24 @@ class TestScheduler(unittest.TestCase):
         sch.stop()
 
 
+    def test_event_interval_throttle(self):
+        """R10：事件驱动开启时用亚秒级间隔轮询修订号（开销≈0），
+        关闭 / 旧模组 / 存档模式回退 version_interval。"""
+        sch = self._scheduler(update_event=True, event_interval=0.2,
+                              version_interval=5.0)
+        self.assertAlmostEqual(sch._poll_interval(), 0.2)
+        sch.p.update_event = False
+        self.assertAlmostEqual(sch._poll_interval(), 5.0)
+        sch.p.update_event = True
+        sch._rev_ok = False               # 旧模组（无 /api/worldrev）
+        self.assertAlmostEqual(sch._poll_interval(), 5.0)
+        sch._rev_ok = True
+        self.assertAlmostEqual(sch._poll_interval(), 0.2)
+        # 存档模式（有变更戳钩子）不走事件分支
+        sch._world_stamp_fn = lambda: 0.0
+        self.assertAlmostEqual(sch._poll_interval(), 5.0)
+        sch.stop()
+
     def test_version_reload_raw_updates_content(self):
         """R10 回归（实机反馈）：本地网格路径下版本变更必须失效 payload
         缓存并重新拉取——否则"有刷新迹象但内容不变"。"""
