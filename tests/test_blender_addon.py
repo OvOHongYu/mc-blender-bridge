@@ -243,6 +243,55 @@ class TestAddonSmoke(unittest.TestCase):
         self.importer.unload_all()
         bpy.data.filepath = ""
 
+    # ------------------------------------------------------------ R11 ----
+    def test_list_manage_pinned_preload(self):
+        """R11：名单操作符 + 同步 + 卸载全部后常见区块自动拉回。"""
+        p = self._p()
+        self._set_props(p)
+        ok, _ = self.ops.connect(p)
+        self.assertTrue(ok)
+        sch = self.state.scheduler()
+        import fake_bpy as _fb
+        cam = bpy.data.objects.new("CameraP")
+        self._scene().camera = cam
+        cam._matrix_world.translation = _fb._Vec3(8.0, 8.0, 8.0)
+        for _ in range(250):
+            self.ops.step_tick(p, self._scene())
+            if not sch.ready and not sch.queue and not sch.inflight_keys:
+                break
+            time.sleep(0.02)
+        obj = bpy.data.objects.get("MCB_ow_0_0")
+        self.assertIsNotNone(obj)
+        # 选中 -> 加入常见区块
+        bpy.context.selected_objects = [obj]
+        ret = fake_bpy.call_operator("mcb.list_manage", bpy.context,
+                                     list_kind='pinned', action='add')
+        self.assertEqual(ret, {'FINISHED'})
+        self.assertIn("overworld:0,0", p.pinned_chunks)
+        # 卸载全部（状态重置）-> 常见区块被自动预载拉回
+        fake_bpy.call_operator("mcb.unload_all", bpy.context)
+        self.assertIsNone(bpy.data.objects.get("MCB_ow_0_0"))
+        for _ in range(250):
+            self.ops.step_tick(p, self._scene())
+            if bpy.data.objects.get("MCB_ow_0_0") and not sch.ready \
+                    and not sch.queue and not sch.inflight_keys:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(bpy.data.objects.get("MCB_ow_0_0"),
+                             "常见区块应被自动预载拉回")
+        # 选中 -> 移出名单；清空
+        bpy.context.selected_objects = [obj]
+        fake_bpy.call_operator("mcb.list_manage", bpy.context,
+                               list_kind='pinned', action='remove')
+        self.assertEqual(p.pinned_chunks, "")
+        # 无选中时加入应被拒绝
+        bpy.context.selected_objects = []
+        ret = fake_bpy.call_operator("mcb.list_manage", bpy.context,
+                                     list_kind='pinned', action='add')
+        self.assertEqual(ret, {'CANCELLED'})
+        self.ops.disconnect(p)
+        self.importer.unload_all()
+
     # ------------------------------------------------------------ 材质 ----
     def test_material_placeholder_and_texture(self):
         client = None

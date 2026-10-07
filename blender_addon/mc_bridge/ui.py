@@ -3,6 +3,7 @@
 import bpy
 
 from . import state
+from .core.util import parse_group_list
 
 
 class MCB_PT_panel(bpy.types.Panel):
@@ -86,6 +87,21 @@ class MCB_PT_panel(bpy.types.Panel):
         row = box.row(align=True)
         row.prop(p, "inflight")
         row.prop(p, "apply_per_tick")
+
+        box = lay.box()
+        box.label(text="区块管理")
+        row = box.row(align=True)
+        op = row.operator("mcb.list_manage", icon='PINNED', text="选中设为常见")
+        op.list_kind, op.action = 'pinned', 'add'
+        opr = row.operator("mcb.list_manage", text="", icon='X')
+        opr.list_kind, opr.action = 'pinned', 'remove'
+        row = box.row(align=True)
+        row.prop(p, "auto_preload")
+        n_pin = len(parse_group_list(p.pinned_chunks))
+        if n_pin:
+            box.label(text="常见区块 %d 组（不主动卸载）" % n_pin, icon='PINNED')
+            opc = box.operator("mcb.list_manage", text="清空常见区块")
+            opc.list_kind, opc.action = 'pinned', 'clear'
 
         box = lay.box()
         box.label(text="资产包（原版贴图 / 模型）")

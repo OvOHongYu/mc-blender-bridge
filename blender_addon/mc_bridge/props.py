@@ -39,6 +39,8 @@ _defaults = {
     "emission_prop": True,
     "emission_keyword": True,
     "distance_first": True,
+    "pinned_chunks": "",
+    "auto_preload": True,
 }
 
 
@@ -103,6 +105,13 @@ class MCB_Properties(bpy.types.PropertyGroup):
     poll_interval: bpy.props.FloatProperty(name="轮询间隔", default=_defaults["poll_interval"], min=0.02, max=1.0)
     version_poll: bpy.props.FloatProperty(name="版本轮询间隔", default=_defaults["version_poll"], min=1.0, max=60.0)
     auto_frame: bpy.props.BoolProperty(name="播放时跟随帧", default=_defaults["auto_frame"])
+    pinned_chunks: bpy.props.StringProperty(name="常见区块", default=_defaults["pinned_chunks"],
+                                            description="钉选的区块组（序列化存储），不被主动卸载。"
+                                                        "用「选中设为常见」从视口添加")
+    auto_preload: bpy.props.BoolProperty(name="自动预载常见区块",
+                                         default=_defaults["auto_preload"],
+                                         description="连接后（以及「卸载全部」后）自动加载全部"
+                                                     "常见区块，无论距离")
     sync_player: bpy.props.BoolProperty(name="玩家跟随相机", default=_defaults["sync_player"],
                                         description="把 MC 玩家实时传送到 Blender 相机的位置与朝向"
                                                     "（需要模组 /api/player 支持）")

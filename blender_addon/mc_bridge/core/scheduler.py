@@ -146,6 +146,7 @@ class Scheduler:
         self.anchor_chunk = None
         self._anchor_group = None       # R9：上次 tick 的锚点组（跨组移动触发重排）
         self.frozen = False             # 预热/烘焙期间禁止卸载
+        self.pinned = set()             # R11：常见区块（组键），不参与迟滞卸载
         self.last_version_poll = -1e9
         self._version_polling = False
         self.stats = {"applied": 0, "evicted": 0, "errors": 0, "tris": 0,
@@ -210,10 +211,10 @@ class Scheduler:
                                        "gen": 0, "last_seen": self.time(),
                                        "version": None}
                     self._push(d, key)
-            # 2. 迟滞卸载
+            # 2. 迟滞卸载（R11：钉选的常见区块豁免）
             if not self.frozen:
                 for key, st in list(self.state.items()):
-                    if st["status"] is None:
+                    if st["status"] is None or key in self.pinned:
                         continue
                     if self._group_dist(key[1], key[2]) > self.p.r_unload:
                         del self.state[key]
@@ -488,6 +489,25 @@ class Scheduler:
     def unfreeze(self):
         with self.lock:
             self.frozen = False
+
+    # ------------------------------------------------------------ 钉选 ----
+    def set_pinned(self, keys):
+        """R11：设置常见区块名单（组键集合）。"""
+        self.pinned = set(keys or ())
+
+    def ensure_pinned(self):
+        """R11：把钉选组补进调度（无距离限制，幂等）——连接后自动预载、
+        「卸载全部」后拉回。返回新入队数。"""
+        n = 0
+        with self.lock:
+            for key in self.pinned:
+                if key[0] != self.p.dim or key in self.state:
+                    continue
+                self.state[key] = {"status": QUEUED, "gen": 0,
+                                   "last_seen": self.time(), "version": None}
+                self._push(self._group_dist(key[1], key[2]), key)
+                n += 1
+        return n
 
     # ------------------------------------------------------------ 统计 ----
     def counts(self):

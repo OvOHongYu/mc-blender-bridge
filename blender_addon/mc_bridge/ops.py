@@ -6,6 +6,7 @@ import bpy
 from . import importer, mats, opssave, state
 from .core.net import ApiClient, ApiError
 from .core.scheduler import Params, Scheduler
+from .core.util import parse_group_list, serialize_group_list
 
 
 # ------------------------------------------------------------- 核心逻辑 ----
@@ -109,6 +110,10 @@ def step_tick(p, scene):
     mats.set_emission_improved(getattr(p, "emission_improved", True))
     mats.set_emission_strategies(getattr(p, "emission_prop", True),
                                  getattr(p, "emission_keyword", True))
+    # 3.5 名单同步（R11 常见区块 / R10 白黑名单）与自动预载
+    _sync_lists(p)
+    if getattr(p, "auto_preload", True):
+        scheduler.ensure_pinned()
     scheduler.maybe_poll_versions()
     # 4. 进度条（预热 / 首载）：LIVE 占全部受管组的比例
     c = scheduler.counts()
@@ -167,6 +172,99 @@ def importer_apply(scheduler, limit):
         scheduler.stats["tris"] += payload["geo"]["tris"]
         n += 1
     return n
+
+
+# ------------------------------------------------------------- 区块名单 ----
+# R11 常见区块（钉选）/ R10 更新白黑名单：序列化在场景属性里随 .blend 保存，
+# step_tick 同步进调度器（字符串变更才解析）。
+
+PINNED_WARN = 64
+
+_LIST_SYNC = {}
+
+
+def _obj_group_key(obj, group):
+    """MCB_ 对象上的 mcb_key 自定义属性 -> 区块组键；非区块对象返回 None。"""
+    try:
+        mk = obj["mcb_key"]
+    except Exception:
+        return None
+    if not isinstance(mk, dict):
+        return None
+    try:
+        cx, cz = int(mk.get("cx")), int(mk.get("cz"))
+    except (TypeError, ValueError):
+        return None
+    g = max(1, int(group or 1))
+    return (str(mk.get("dim", "")), cx // g * g, cz // g * g)
+
+
+def _selected_group_keys(context, p):
+    g = int(getattr(p, "group", 2) or 2)
+    keys = []
+    for obj in context.selected_objects or ():
+        k = _obj_group_key(obj, g)
+        if k is not None and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def _sync_lists(p):
+    """把场景属性里的名单字符串同步进调度器（按 (调度器id, 字符串) 缓存）。"""
+    sch = state.scheduler()
+    if sch is None:
+        _LIST_SYNC.clear()
+        return
+    for prop, setter in (("pinned_chunks", sch.set_pinned),):
+        s = getattr(p, prop, "") or ""
+        if _LIST_SYNC.get(prop) != (id(sch), s):
+            _LIST_SYNC[prop] = (id(sch), s)
+            setter(parse_group_list(s))
+
+
+class MCB_OT_list_manage(bpy.types.Operator):
+    bl_idname = "mcb.list_manage"
+    bl_label = "区块名单管理"
+    bl_description = "把选中的区块对象加入/移出名单（常见区块、更新白/黑名单）"
+
+    list_kind: bpy.props.EnumProperty(name="名单", items=[
+        ("pinned", "常见区块", "不被主动卸载"),
+        ("whitelist", "更新白名单", "总是自动更新"),
+        ("blacklist", "更新黑名单", "永不自动更新")])
+    action: bpy.props.EnumProperty(name="操作", items=[
+        ("add", "加入", ""), ("remove", "移出", ""), ("clear", "清空", "")])
+
+    def execute(self, context):
+        p = context.scene.mcb
+        prop = {"pinned": "pinned_chunks", "whitelist": "update_whitelist",
+                "blacklist": "update_blacklist"}[self.list_kind]
+        kind_name = {"pinned": "常见区块", "whitelist": "更新白名单",
+                     "blacklist": "更新黑名单"}[self.list_kind]
+        keys = parse_group_list(getattr(p, prop, ""))
+        if self.action == "clear":
+            n = len(keys)
+            keys = []
+        else:
+            sel = _selected_group_keys(context, p)
+            if not sel:
+                self.report({'WARNING'}, "先选中要操作的 MCB_ 区块对象")
+                return {'CANCELLED'}
+            if self.action == "add":
+                new = [k for k in sel if k not in keys]
+                keys.extend(new)
+                n = len(new)
+                if self.list_kind == "pinned" and len(keys) > PINNED_WARN:
+                    self.report({'WARNING'},
+                                "常见区块超过 %d 组，注意内存占用" % PINNED_WARN)
+            else:
+                drop = set(sel)
+                n = len([k for k in keys if k in drop])
+                keys = [k for k in keys if k not in drop]
+        setattr(p, prop, serialize_group_list(keys))
+        self.report({'INFO'}, "%s %s %d 组" % (
+            kind_name, {"add": "加入", "remove": "移出",
+                        "clear": "清空"}[self.action], n))
+        return {'FINISHED'}
 
 
 def disconnect(p, keep_objects=True):
@@ -321,6 +419,15 @@ class MCB_OT_unload_all(bpy.types.Operator):
 
     def execute(self, context):
         n = importer.unload_all()
+        sch = state.scheduler()
+        if sch is not None:
+            # 清空调度器状态：范围内组由下个 tick 重新入队，常见区块由
+            # 自动预载拉回（R11）；在途抓取会因状态缺失被丢弃（安全）
+            with sch.lock:
+                sch.state.clear()
+                sch.ready.clear()
+                sch.queue.clear()
+                sch.inflight_keys.clear()
         self.report({'INFO'}, "已卸载 %d 个对象" % n)
         return {'FINISHED'}
 
@@ -534,7 +641,7 @@ def unregister_handlers():
 
 
 CLASSES = (MCB_OT_connect, MCB_OT_disconnect, MCB_OT_unload_all,
-           MCB_OT_leftover_keep, MCB_OT_leftover_clear,
+           MCB_OT_list_manage, MCB_OT_leftover_keep, MCB_OT_leftover_clear,
            MCB_OT_use_selected_as_anchor, MCB_OT_prewarm, MCB_OT_bake,
            MCB_OT_refresh, MCB_OT_bind_camera, MCB_OT_pick_save_dir,
            MCB_OT_load_assets)

@@ -235,6 +235,45 @@ class TestScheduler(unittest.TestCase):
                          "队列弹出序应按新锚点距离非降")
         sch.stop()
 
+    # ------------------------------------------------------------ R11 ----
+    def test_pinned_no_evict(self):
+        """R11：钉选的常见区块移出卸载半径后仍在场景。"""
+        sch = self._scheduler(r_load=2, r_unload=3)
+        imp = FakeImporter()
+        sch.update_anchor(8.0, 8.0)
+        self.assertTrue(imp.apply(sch))
+        key = ("overworld", 0, 0)
+        self.assertIn(key, imp.objects)
+        sch.set_pinned([key])
+        sch.update_anchor(8.0 + 16 * 8, 8.0)   # 远超 r_unload
+        self.assertTrue(imp.apply(sch))
+        self.assertIn(key, imp.objects, "钉选组不应被卸载")
+        self.assertNotIn(("overworld", 2, 0), imp.objects,
+                         "未钉选的邻居组应照常卸载")
+        sch.stop()
+
+    def test_pinned_preload(self):
+        """R11：ensure_pinned 把远距离钉选组补进调度（自动预载）。"""
+        sch = self._scheduler(r_load=2, r_unload=3)
+        key = ("overworld", 10, 10)
+        sch.set_pinned([key])
+        sch.update_anchor(8.0, 8.0)
+        self.assertEqual(sch.ensure_pinned(), 1)
+        imp = FakeImporter()
+        self.assertTrue(imp.apply(sch))
+        self.assertIn(key, imp.objects, "远距离钉选组应被预载")
+        # 幂等：再次 ensure 不重复入队
+        self.assertEqual(sch.ensure_pinned(), 0)
+        sch.stop()
+
+    def test_pinned_dim_mismatch_ignored(self):
+        """R11：其它维度的钉选组不在当前维度预载。"""
+        sch = self._scheduler()
+        sch.set_pinned([("the_nether", 0, 0)])
+        sch.update_anchor(8.0, 8.0)
+        self.assertEqual(sch.ensure_pinned(), 0)
+        sch.stop()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

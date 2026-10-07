@@ -19,6 +19,36 @@ def chunk_origin(cx: int, cz: int):
     return cx << 4, cz << 4
 
 
+# ---- 区块组名单序列化（R10/R11：常见区块 / 更新白黑名单，随 .blend 保存）----
+
+def parse_group_list(s):
+    """'dim:gx,gz;dim:gx,gz' -> [(dim, gx, gz), ...]；坏条目跳过。"""
+    out = []
+    for part in (s or "").split(";"):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        dim, coords = part.rsplit(":", 1)
+        try:
+            gx, gz = (int(v) for v in coords.split(","))
+        except ValueError:
+            continue
+        out.append((dim, gx, gz))
+    return out
+
+
+def serialize_group_list(keys):
+    """[(dim, gx, gz), ...] -> 'dim:gx,gz;...'（保持顺序，去重）。"""
+    out, seen = [], set()
+    for dim, gx, gz in keys or ():
+        k = (str(dim), int(gx), int(gz))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append("%s:%d,%d" % k)
+    return ";".join(out)
+
+
 def png_bytes(width, height, rgba: bytearray) -> bytes:
     """极简 PNG 编码（RGBA8，无依赖），返回字节。"""
     raw = bytearray()
