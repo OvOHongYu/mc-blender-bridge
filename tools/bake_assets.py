@@ -1271,11 +1271,15 @@ class Baker:
         return idx
 
     def _meta_of(self, block, model, json_quads):
-        """(class, tintMask, useModel)；json_quads 非空 = 有 JSON 几何。"""
+        """(class, tintMask, useModel)；json_quads 非空 = 有 JSON 几何。
+
+        useModel 用**更严的** `_is_simple_cube`：class 判定（是否实心遮挡）
+        只看几何是否占满整格，而"能否用程序化立方体等价渲染"还要求
+        侧面贴图一致、无 face rotation——否则须注入模型几何（活塞等）。"""
         if json_quads:
             return (self._classify(block, model, json_quads),
                     self._tint_mask(model),
-                    0 if self._is_full_cube(model) else 1)
+                    0 if self._is_simple_cube(model) else 1)
         return NONCUBE, 0, 1
 
     def _variant_meta(self, block, model, json_quads, quads):
@@ -1474,13 +1478,42 @@ class Baker:
 
     @staticmethod
     def _is_full_cube(model):
-        els = model.get("elements") or []
+        els = (model or {}).get("elements") or []
         if len(els) != 1:
             return False
         e = els[0]
         return (list(e.get("from") or []) == [0, 0, 0]
                 and list(e.get("to") or []) == [16, 16, 16]
                 and len(e.get("faces") or {}) >= 6)
+
+    @staticmethod
+    def _is_simple_cube(model):
+        """是否"简单整立方体"——可用程序化立方体（top/side/bottom 三组贴图）近似。
+
+        比 `_is_full_cube` 更严：程序化路径只能表达 +Y=top / -Y=bottom /
+        4 侧=side 三组贴图，且**无法表达面 rotation 与 blockstate 朝向**。
+        因此"几何整块但有朝向、或侧面贴图不一致"的模型必须注入模型几何：
+        活塞（`piston` 是单元素 16³，但活塞头贴图在 -Z 面、且各面带
+        rotation）若走程序化路径，朝向与正面贴图全部丢失——这正是
+        "未推动活塞水平放置时贴图错乱"的根因；熔炉/类 orientable 方块
+        同理（正面贴图会被 side 覆盖）。"""
+        if model is None or not Baker._is_full_cube(model):
+            return False
+        faces = (model["elements"][0].get("faces") or {})
+        sides = [faces.get(d) for d in ("north", "south", "east", "west")]
+        if any(f is None for f in sides):
+            return False
+        for f in sides + [faces.get("up"), faces.get("down")]:
+            if f is not None and int(f.get("rotation", 0) or 0):
+                return False
+        # 比较**解析后**的贴图名：cube_all 这类模型的引用是
+        # "#north"/"#east"/… 各方向不同，但都解析到同一张贴图；
+        # 而活塞/熔炉的 4 侧解析后本就不同（活塞头在 ±Z、熔炉正面在 -Z）。
+        texs = [ModelLoader.resolve_texture(model, f.get("texture"))
+                for f in sides]
+        if any(t is None for t in texs):
+            return False
+        return all(t == texs[0] for t in texs)
 
     @staticmethod
     def _tint_mask(model):

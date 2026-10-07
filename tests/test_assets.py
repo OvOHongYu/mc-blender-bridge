@@ -255,6 +255,57 @@ class TestBakeAndLoad(unittest.TestCase):
 
 
 
+class TestSimpleCubeDetection(unittest.TestCase):
+    """实机反馈（活塞）：`_is_full_cube` 只判"几何占满整格"（决定 class），
+    而能否走**程序化立方体路径**还要求侧面贴图一致、无 face rotation——
+    否则活塞这类方块会丢失朝向与正面贴图（活塞头贴图跑到错误的面上）。"""
+
+    @staticmethod
+    def _cube(**over):
+        faces = {d: {"texture": "minecraft:block/all"}
+                 for d in ("down", "up", "north", "south", "west", "east")}
+        faces.update(over)
+        return {"textures": {}, "elements": [
+            {"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces}]}
+
+    def test_plain_cube_is_simple(self):
+        from bake_assets import Baker
+        m = self._cube()
+        self.assertTrue(Baker._is_full_cube(m))
+        self.assertTrue(Baker._is_simple_cube(m))
+
+    def test_oriented_side_texture_not_simple(self):
+        # 活塞：活塞头贴图在 -Z（north），4 侧不再一致
+        from bake_assets import Baker
+        m = self._cube(north={"texture": "minecraft:block/head"})
+        self.assertTrue(Baker._is_full_cube(m))     # 仍是实心整块（class 不变）
+        self.assertFalse(Baker._is_simple_cube(m))  # 但不应走程序化路径
+
+    def test_face_rotation_not_simple(self):
+        from bake_assets import Baker
+        m = self._cube(east={"texture": "minecraft:block/all", "rotation": 90})
+        self.assertFalse(Baker._is_simple_cube(m))
+
+    def test_texture_refs_resolved(self):
+        # cube_all 的引用是 #north/#east/…（字符串不同、解析到同一张贴图）
+        from bake_assets import Baker
+        m = {"textures": {"all": "minecraft:block/x", "north": "#all",
+                          "south": "#all", "east": "#all", "west": "#all",
+                          "up": "#all", "down": "#all"},
+             "elements": [{"from": [0, 0, 0], "to": [16, 16, 16],
+                           "faces": {d: {"texture": "#" + d}
+                                     for d in ("down", "up", "north", "south",
+                                               "west", "east")}}]}
+        self.assertTrue(Baker._is_simple_cube(m))
+
+    def test_non_cube_model(self):
+        from bake_assets import Baker
+        m = self._cube()
+        m["elements"][0]["to"] = [16, 8, 16]        # 半砖
+        self.assertFalse(Baker._is_full_cube(m))
+        self.assertFalse(Baker._is_simple_cube(m))
+
+
 class TestPaintingGeometry(unittest.TestCase):
     """R5：画实体 NBT -> 平面四边形（尺寸 / 朝向 / UV / 区块局部坐标）。"""
 
