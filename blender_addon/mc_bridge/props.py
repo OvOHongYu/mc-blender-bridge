@@ -38,6 +38,7 @@ _defaults = {
     "emission_improved": True,
     "emission_prop": True,
     "emission_keyword": True,
+    "distance_first": True,
 }
 
 
@@ -69,6 +70,12 @@ class MCB_Properties(bpy.types.PropertyGroup):
                                                    "（面数更少、生成更快）。变更后需重新加载区块")
     r_load: bpy.props.IntProperty(name="加载半径", default=_defaults["r_load"], min=1, max=64,
                                   description="以锚点为中心的加载半径（区块）")
+    distance_first: bpy.props.BoolProperty(name="按摄像机距离优先",
+                                           default=_defaults["distance_first"],
+                                           description="锚点移动时按新位置重排加载队列，"
+                                                       "就绪区块按距离应用——近处先上屏"
+                                                       "（网络抖动时远组先完成也不插队）。"
+                                                       "派发保持并行，吞吐无损")
     r_unload: bpy.props.IntProperty(name="卸载半径", default=_defaults["r_unload"], min=2, max=96,
                                     description="迟滞卸载半径，应大于加载半径")
     ymin: bpy.props.IntProperty(name="Y 下限", default=_defaults["ymin"])

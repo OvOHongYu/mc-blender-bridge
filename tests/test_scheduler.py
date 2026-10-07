@@ -180,6 +180,61 @@ class TestScheduler(unittest.TestCase):
         self.assertGreater(geo["nq"], 50)
         sch.stop()
 
+    # ------------------------------------------------------------ R9 ----
+    def _stage_ready(self, sch, order):
+        """按 order（组 x 坐标序列）把远/近组塞进 ready（模拟乱序完成）。"""
+        with sch.lock:
+            for gx in order:
+                key = ("overworld", gx, 0)
+                sch.state[key] = {"status": "READY", "gen": 0,
+                                  "last_seen": sch.time(), "version": None}
+                sch.ready.append((key, {"geo": {}}))
+
+    def test_distance_first_apply_order(self):
+        """R9：远组先完成时，应用仍按距离（近组先上屏）。"""
+        sch = self._scheduler(distance_first=True)
+        self._stage_ready(sch, (4, 0))       # 远组先 ready
+        out = sch.poll_apply(10)
+        self.assertEqual([k[1] for k, _ in out], [0, 4])
+        sch.stop()
+
+    def test_distance_first_off_keeps_ready_order(self):
+        """R9：关闭开关保持完成序（不做重排）。"""
+        sch = self._scheduler(distance_first=False)
+        self._stage_ready(sch, (4, 0))
+        out = sch.poll_apply(10)
+        self.assertEqual([k[1] for k, _ in out], [4, 0])
+        sch.stop()
+
+    def test_queue_reorder_on_anchor_move(self):
+        """R9：锚点跨组移动后，队列按新锚点距离重排（旧入队序作废）。"""
+        import heapq
+        sch = self._scheduler(r_load=2, r_unload=3, distance_first=True)
+        sch._drain = lambda: None            # 只查队列序，不派发
+        sch.update_anchor(8.0, 8.0)          # 锚点区块 (0,0)
+        self.assertTrue(sch.queue)
+        # 在旧队列前面压一个"新锚点附近"的组，模拟旧排序残留
+        far_key = ("overworld", -6, 0)
+        with sch.lock:
+            sch.state[far_key] = {"status": "QUEUED", "gen": 0,
+                                  "last_seen": sch.time(), "version": None}
+            heapq.heappush(sch.queue, (0.0, sch._seq, far_key))
+            sch._seq += 1
+        sch.update_anchor(8.0 + 16 * 2, 8.0)  # 锚点区块 (2,0)：跨组移动
+        popped = []
+        with sch.lock:
+            while sch.queue:
+                popped.append(heapq.heappop(sch.queue)[2])
+        G = sch.p.group
+        dists = []
+        for _dim, gx, gz in popped:
+            dx = max(gx - 2, 2 - (gx + G - 1), 0)
+            dz = max(gz, -gz - G + 1, 0)
+            dists.append(math.hypot(dx, dz))
+        self.assertEqual(dists, sorted(dists),
+                         "队列弹出序应按新锚点距离非降")
+        sch.stop()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -45,6 +45,9 @@ class Params:
         # 发光筛选策略（R6 反馈）：按亮度属性 / 按英文 ID 关键词
         self.emission_prop = bool(kw.get("emission_prop", True))
         self.emission_keyword = bool(kw.get("emission_keyword", True))
+        # R9 按摄像机距离优先：锚点移动时重排队列、ready 按距离应用。
+        # 派发保持并行（inflight 全填满）——串行化会造成队头阻塞，明确不做。
+        self.distance_first = bool(kw.get("distance_first", True))
 
     def as_dict(self):
         return dict(dim=self.dim, r_load=self.r_load, r_unload=self.r_unload,
@@ -141,6 +144,7 @@ class Scheduler:
                                            thread_name_prefix="mcb")
         self.anchor = (0.0, 0.0)
         self.anchor_chunk = None
+        self._anchor_group = None       # R9：上次 tick 的锚点组（跨组移动触发重排）
         self.frozen = False             # 预热/烘焙期间禁止卸载
         self.last_version_poll = -1e9
         self._version_polling = False
@@ -182,6 +186,21 @@ class Scheduler:
                 if math.hypot(cx - acx, cz - acz) <= R:
                     need[self._group_origin(cx, cz)] = None
         with self.lock:
+            # 0. R9 距离优先：锚点跨组移动后，队列里的优先级是旧锚点距离——
+            #    重建 QUEUED 项的距离并重新入堆（O(n)，n=待载组数，通常 <200）
+            ag = self._group_origin(acx, acz)
+            if ag != self._anchor_group:
+                self._anchor_group = ag
+                if self.p.distance_first and self.queue:
+                    fresh = []
+                    for _, _, key in self.queue:
+                        st = self.state.get(key)
+                        if st is not None and st["status"] == QUEUED:
+                            fresh.append((self._group_dist(key[1], key[2]),
+                                          self._seq, key))
+                            self._seq += 1
+                    self.queue = fresh
+                    heapq.heapify(self.queue)
             # 1. 缺失/变化入队
             for (gx, gz) in need:
                 key = (self.p.dim, gx, gz)
@@ -371,9 +390,16 @@ class Scheduler:
 
     # ------------------------------------------------------------ 应用 ----
     def poll_apply(self, max_n=2):
-        """主线程取回已就绪的区块（blender 定时器分帧调用）。"""
+        """主线程取回已就绪的区块（blender 定时器分帧调用）。
+
+        R9 距离优先：网络抖动会让远组先 ready，按组距离排序后再出队——
+        近处先上屏（n = ready 长度，微秒级；关闭开关则保持完成序）。"""
         out = []
         with self.lock:
+            if self.p.distance_first and len(self.ready) > 1:
+                self.ready = deque(
+                    sorted(self.ready,
+                           key=lambda kp: self._group_dist(kp[0][1], kp[0][2])))
             while self.ready and len(out) < max_n:
                 key, payload = self.ready.popleft()
                 st = self.state.get(key)

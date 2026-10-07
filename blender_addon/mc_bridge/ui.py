@@ -79,6 +79,7 @@ class MCB_PT_panel(bpy.types.Panel):
         col.prop(p, "mode")
         col.prop(p, "group")
         col.prop(p, "leaves")
+        col.prop(p, "distance_first")
         row = box.row(align=True)
         row.prop(p, "ymin")
         row.prop(p, "ymax")
