@@ -1,0 +1,27 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+
+[[mods]]
+modId = "mcbridge"
+version = "${version}"
+displayName = "MC Bridge 数据服务"
+authors = "zcube"
+description = '''在 127.0.0.1 暴露区块几何数据 HTTP API，供 Blender 桥接插件动态加载世界。仅监听本机回环。'''
+
+[[mixins]]
+config = "mcbridge.mixins.json"
+
+[[dependencies.mcbridge]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.0,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.mcbridge]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1,1.22)"
+ordering = "NONE"
+side = "BOTH"

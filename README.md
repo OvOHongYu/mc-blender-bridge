@@ -68,10 +68,14 @@ LOD 分层已移除，全部距离统一满质量网格）。
 ```bash
 pip install pillow   # 仅烘焙工具需要
 python tools/bake_assets.py "<客户端 jar 或资源包 zip>" "mods/*.jar" -o dist/assets.mcba --mc-version 1.21.1
-# 客户端 jar 示例：.minecraft/versions/1.21.1-Fabric_0.17.2/1.21.1-Fabric_0.17.2.jar
+# 客户端 jar 示例：.minecraft/versions/1.21.1-NeoForge_21.1.256/1.21.1-NeoForge_21.1.256.jar
 # 模组方块：把 mods/*.jar 一并作为输入即可（自动扫描各命名空间）
 #   PowerShell / cmd 不会替原生命令展开 *，加引号交给脚本展开即可（如上）
 ```
+
+> 资产包内容**只取决于烘焙时传入了哪些 jar**：新增/更换模组后必须重新烘焙，
+> 否则新模组方块不在包内，会退回程序化色块（表现为"只有旧模组的方块正常"）。
+> 烘焙结束打印的 `命名空间: ...` 一行可用来核对覆盖范围。
 
 N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
 
@@ -79,6 +83,10 @@ N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
 - 顶点色 = 逐面染色（草/叶/水随群系取色，R8）；
 - 非整立方体方块按 `facing/half/shape` 等状态注入烘焙模型几何（真实 UV + cullface），
   **模组方块**把 `mods/*.jar` 一并烘焙即自动支持（按命名空间扫描，形状/贴图/分类通用）；
+- **非常规模型 loader** 自动展开（R12）：`neoforge:obj`（OBJ+MTL）与
+  `neoforge:composite`（复合子模型），如 Create 的粉碎轮 / 飞轮 / 数码管 / 阀门把手；
+- **方块实体渲染部件**静态补全（R12 方向 3）：Create 传送带（按 `part/slope`
+  选分段模型）、风扇叶、钻头、搅拌头、压板、仪表盘、图纸大炮炮管；
 - 已加载资产包时自动走本地网格以注入模型（控制模式与存档模式一致）；
   「烘焙模型」开关可关闭；
 - **实体**（画 / 盔甲架，存档模式 + 控制模式）：资产包 v4 画变体表 +
@@ -108,6 +116,7 @@ N 面板 > MC Bridge > 资产包 > 选择 `assets.mcba` > 加载。加载后：
 | `blender_addon/mc_bridge/` | Blender 插件（bpy 层 + 纯 Python 核心） | ✅ 已实现并测试 |
 | `server_sim/` | MC 模拟服务器（无 MC 环境的开发/测试替身，与模组 API 同构） | ✅ 已实现并测试 |
 | `mcmod/` | Fabric 服务端模组（Java） | ✅ 源码完整；纯 Java 部分已与 Python 逐字节对拍 |
+| `mcmod-neoforge/` | NeoForge 服务端模组（与 Fabric 版等价；共享纯 Java 源码） | ✅ 已实现（21.1.x） |
 | `tests/` | 223 项 Python 测试 + 跨语言夹具 | ✅ 全部通过 |
 | `docs/` | 设计方案 / 协议规范 / 用户手册 / 路线图 / 预览图 | ✅ |
 | `tools/` | 资产烘焙、夹具生成、预览导出、Java 合并验证脚本 | ✅ |
@@ -138,12 +147,15 @@ python3 server_sim/mc_server_sim.py --port 8788
 ## 快速开始（真实 Minecraft）
 
 ```bash
-# 1. 构建模组（需 JDK 17+ 与网络）
-cd mcmod && gradle build  # 需 Gradle 8.14+（或用 IDE 打开 mcmod 执行）
-# 产物: build/libs/mcbridge-1.5.0.jar
+# 1. 构建模组（需 JDK 21 与网络）；Fabric 与 NeoForge 版协议/行为完全一致，二选一
+cd mcmod && gradle build             # Fabric 版（需 Fabric API）
+cd mcmod-neoforge && gradle build    # NeoForge 版（CI/正常网络）
+python tools/build_neoforge_local.py --instance "<实例版本目录>"   # NeoForge 本地离线构建
+# 产物: mcmod/build/libs/mcbridge-1.5.0.jar 或 mcmod-neoforge/build/libs/mcbridge-neoforge-1.5.0.jar
 
 # 2. 服务端安装（推荐独立服务端，无暂停问题；单人模式请"对局域网开放"）
-cp mcbridge-1.5.0.jar <服务端>/mods/
+cp mcbridge-1.5.0.jar <服务端>/mods/              # Fabric
+cp mcbridge-neoforge-1.5.0.jar <服务端>/mods/     # NeoForge
 # 启动服务端，确认日志: "MC Bridge API 已启动: http://127.0.0.1:8788"
 
 # 3. Blender 插件连接 127.0.0.1:8788（默认端口）
@@ -165,6 +177,30 @@ python3 tools/gen_fixtures.py
 # 预览导出（需先启动 server_sim）
 python3 tools/export_preview.py   # -> docs/img/preview.obj + preview.png
 ```
+
+## 图形界面验收脚本
+
+开发/验收用：一条命令以**工厂启动 + 开发模式注册插件**打开 Blender GUI，自动连接世界、
+摆好相机与光照，交给 N 面板交互。一份脚本覆盖控制/存档两种模式与两个测试实例
+（`dist/_launch_gui.py`）。
+
+```bash
+# 默认：控制模式 + NeoForge 实例 + 相机跟随玩家眼位
+blender.exe --factory-startup --python dist\_launch_gui.py
+
+# 存档模式 + Fabric 实例 + 俯视群系平台
+blender.exe --factory-startup --python dist\_launch_gui.py -- --mode save --instance fabric
+
+# 自定义相机（MC 坐标 x,y,z）
+blender.exe --factory-startup --python dist\_launch_gui.py -- --eye 64,80,120 --aim 64,-53,40
+```
+
+Blender 自身参数与脚本参数以 `--` 分隔。参数（`-- --help` 查看全部）：
+`--instance {neoforge,fabric}`（决定默认存档目录）、`--mode {control,save}`、
+`--camera {player,biome,water,none}`（默认 control→player / save→biome）、
+`--eye/--aim`、`--r-load/--r-unload/--ymin/--ymax`、`--group/--leaves`、
+`--no-models/--no-biome-tint/--sync-player`、`--assets/--save/--host/--port`。
+日志写入 `dist/_blender_gui.log` 与 `C:\Users\Public\mcb_blender_gui.log`。
 
 ## 性能（R=4 共 49 区块，真实 Blender 4.5 实测）
 

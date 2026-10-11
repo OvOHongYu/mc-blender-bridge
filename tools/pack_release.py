@@ -3,12 +3,13 @@
 
 产物：
   dist/mc_bridge-<ver>-blender-addon.zip   Blender 插件（mc_bridge/ 顶层目录）
-  dist/mc-blender-bridge-<ver>-dist.zip    插件 zip + 模组 jar + INSTALL.txt + bake_assets.py
+  dist/mc-blender-bridge-<ver>-dist.zip    插件 zip + 双模组 jar + INSTALL.txt + bake_assets.py
   dist/INSTALL.txt
 
 用法：python tools/pack_release.py
 版本号从 blender_addon/mc_bridge/__init__.py 的 bl_info 与 mcmod/gradle.properties
-各读一份并断言一致，避免"改了一边忘另一边"。
+各读一份并断言一致，避免"改了一边忘另一边"。mcmod-neoforge 在 build.gradle 里
+读同一份 gradle.properties，无需单独断言。
 """
 import os
 import re
@@ -18,6 +19,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADDON_SRC = os.path.join(ROOT, "blender_addon", "mc_bridge")
 MOD_JAR_DIR = os.path.join(ROOT, "mcmod", "build", "libs")
+MOD_JAR_DIR_NF = os.path.join(ROOT, "mcmod-neoforge", "build", "libs")
 DIST = os.path.join(ROOT, "dist")
 
 
@@ -41,6 +43,7 @@ VER = addon_version()
 if VER != mod_version():
     sys.exit("版本不一致: bl_info=%s gradle=%s" % (VER, mod_version()))
 MOD_JAR = "mcbridge-%s.jar" % VER
+MOD_JAR_NF = "mcbridge-neoforge-%s.jar" % VER
 ADDON_ZIP = os.path.join(DIST, "mc_bridge-%s-blender-addon.zip" % VER)
 DIST_ZIP = os.path.join(DIST, "mc-blender-bridge-%s-dist.zip" % VER)
 INSTALL = os.path.join(DIST, "INSTALL.txt")
@@ -52,7 +55,8 @@ INSTALL_TXT = """MC Blender Bridge v{ver} 发行包
 ----
 1. mc_bridge-{ver}-blender-addon.zip   Blender 插件（控制模式 + 存档模式 + 资产包）
 2. {jar}                Minecraft 1.21.1 Fabric 模组（仅控制模式需要）
-3. bake_assets.py                    资产烘焙工具（原版/模组贴图 + 模型，可选但强烈推荐）
+3. {jar_nf}      Minecraft 1.21.1 NeoForge 模组（与 Fabric 版等价，二选一）
+4. bake_assets.py                    资产烘焙工具（原版/模组贴图 + 模型，可选但强烈推荐）
 
 安装
 ----
@@ -61,7 +65,9 @@ INSTALL_TXT = """MC Blender Bridge v{ver} 发行包
   mc_bridge-{ver}-blender-addon.zip -> 勾选启用。N 面板 -> MC Bridge 即面板。
 
 [MC 模组]（仅「控制模式」需要；存档模式无需任何 MC 组件）
-  放入 mods/ 目录，启动后日志出现
+  Fabric 加载器：放 mcbridge-{ver}.jar（需 Fabric API）
+  NeoForge 加载器：放 mcbridge-neoforge-{ver}.jar（无需额外前置）
+  两种模组等价、同端口。启动后日志出现
   "MC Bridge API 已启动: http://127.0.0.1:8788" 即成功。
 
 [资产包]（可选，强烈推荐：原版+模组贴图与真实模型形状）
@@ -78,7 +84,7 @@ INSTALL_TXT = """MC Blender Bridge v{ver} 发行包
 v{ver} 主要变更
 ------------
 见仓库 docs/roadmap.md 与 Release 页面说明。
-""".format(ver=VER, jar=MOD_JAR)
+""".format(ver=VER, jar=MOD_JAR, jar_nf=MOD_JAR_NF)
 
 
 def zip_dir(src, dst):
@@ -101,9 +107,14 @@ def main():
     jar = os.path.join(MOD_JAR_DIR, MOD_JAR)
     if not os.path.isfile(jar):
         sys.exit("未找到模组 jar: %s（先在 mcmod 下执行 gradle build）" % jar)
+    jar_nf = os.path.join(MOD_JAR_DIR_NF, MOD_JAR_NF)
+    if not os.path.isfile(jar_nf):
+        sys.exit("未找到 NeoForge 模组 jar: %s（先在 mcmod-neoforge 下执行 "
+                 "gradle build，或本地运行 tools/build_neoforge_local.py）" % jar_nf)
     with zipfile.ZipFile(DIST_ZIP, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(ADDON_ZIP, os.path.basename(ADDON_ZIP))
         z.write(jar, MOD_JAR)
+        z.write(jar_nf, MOD_JAR_NF)
         z.write(INSTALL, "INSTALL.txt")
         z.write(os.path.join(ROOT, "tools", "bake_assets.py"), "bake_assets.py")
     print("插件包:", ADDON_ZIP, os.path.getsize(ADDON_ZIP))

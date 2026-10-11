@@ -495,7 +495,7 @@ class Scheduler:
         self.last_version_poll = t
         self._version_polling = True
         if self._world_stamp_fn is not None:
-            self.executor.submit(self._poll_save_stamp)
+            self.executor.submit(self._poll_save_stamp, self.p.dim)
         else:
             self.executor.submit(self._poll_versions, live)
         return True
@@ -557,30 +557,48 @@ class Scheduler:
         finally:
             self._version_polling = False
 
-    def _poll_save_stamp(self):
-        """R10 存档模式：变更戳变化 -> 清缓存并重扫全部受管 LIVE 组。
+    def _poll_save_stamp(self, dim):
+        """R10 存档模式：维度变更集变化 -> 只重载受影响 region 覆盖的 LIVE 组。
 
-        首次轮询只建立基线不重载；黑名单组跳过，总开关关闭时仅白名单组。"""
+        world_stamp(dim) 返回该维度 region/entities 的 .mca 指纹集合；
+        对比新旧集合得到**变化的 region 文件**（32×32 区块），只把覆盖其中
+        区块的组重新排队——游戏与 Blender 同时开着时，远处/其他维度的写盘
+        不再触发全视野重载（实机反馈"每隔几秒自动刷新"的根因）。
+        首次轮询只建立基线；黑名单组跳过，总开关关闭时仅白名单组。"""
         try:
-            st = self._world_stamp_fn()
-            changed = self._last_stamp is not None and st != self._last_stamp
-            self._last_stamp = st
-            if not changed:
+            cur = self._world_stamp_fn(dim)
+            old = self._last_stamp
+            self._last_stamp = cur
+            if old is None or cur == old:
+                return
+            # 变化的 region（新增/消失/指纹变化）-> 受影响区块集合
+            new = {k[:3]: k for k in cur}
+            prev = {k[:3]: k for k in old}
+            changed = {k for k in new.keys() | prev.keys()
+                       if new.get(k) != prev.get(k)}
+            touched = set()
+            for kind, rx, rz in changed:
+                for cx in range(rx * 32, rx * 32 + 32):
+                    for cz in range(rz * 32, rz * 32 + 32):
+                        touched.add((cx, cz))
+            if not touched:
                 return
             if self._invalidate_fn is not None:
-                self._invalidate_fn()
+                self._invalidate_fn(dim)
+            g = self.p.group
             with self.lock:
                 for key, s in list(self.state.items()):
                     if s["status"] != LIVE or not self._updatable(key):
                         continue
+                    if not any((key[1] + i, key[2] + j) in touched
+                               for i in range(g) for j in range(g)):
+                        continue
                     s["gen"] += 1
                     s["status"] = QUEUED
                     self._push(self._group_dist(key[1], key[2]), key)
-                # 组内 payload 缓存一并失效（与版本路径同理）
-                for (dim, cx, cz) in list(self.state.keys()):
-                    for i in range(self.p.group):
-                        for j in range(self.p.group):
-                            self.store.pop((self.p.dim, cx + i, cz + j))
+                # 受影响区块的 payload 缓存一并失效（与版本路径同理）
+                for (cx, cz) in touched:
+                    self.store.pop((dim, cx, cz))
         except Exception as e:
             self.log("save stamp error", e)
         finally:

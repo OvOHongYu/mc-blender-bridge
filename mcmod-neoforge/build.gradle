@@ -1,0 +1,63 @@
+// NeoForge 版模组（与 mcmod/ 的 Fabric 版并存；协议与行为完全一致）。
+//
+// 源码复用策略：纯 Java 部分（codec/、mesh 主体、http/Query、core/VersionTracker、
+// tex/）直接引用 ../mcmod 的源码目录（srcDir + exclude），不做拷贝——避免两份
+// 实现漂移。只有 5 个含加载器/MC API 的文件在本工程用 Mojang 官方映射重写：
+//   McBridge（入口）、WorldChunkMixin、ChunkSnapshotService、ApiServer、BlockClassifier
+plugins {
+    id 'net.neoforged.moddev' version '2.0.148'
+}
+
+// 版本与 Fabric 工程共用单一来源（pack_release.py 会断言 bl_info / gradle 一致）
+def sharedProps = new Properties()
+file("../mcmod/gradle.properties").withInputStream { sharedProps.load(it) }
+version = sharedProps.getProperty("mod_version")
+group = sharedProps.getProperty("maven_group")
+
+base {
+    archivesName = 'mcbridge-neoforge'
+}
+
+repositories {
+    mavenCentral()
+}
+
+neoForge {
+    version = project.neoforge_version
+    runs {
+        server {
+            server()
+        }
+    }
+    mods {
+        mcbridge {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+sourceSets.main.java {
+    srcDir '../mcmod/src/main/java'
+    // 加载器相关文件用本工程 mojmap 版本（同名同包）替代：
+    exclude 'com/zcube/mcbridge/McBridge.java'
+    exclude 'com/zcube/mcbridge/mixin/**'
+    exclude 'com/zcube/mcbridge/core/ChunkSnapshotService.java'
+    exclude 'com/zcube/mcbridge/http/ApiServer.java'
+    exclude 'com/zcube/mcbridge/mesh/BlockClassifier.java'
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("META-INF/neoforge.mods.toml") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}

@@ -409,37 +409,51 @@ class AnvilWorld:
             self._entities.clear()
 
     # ------------------------------------------------------------ R10 ----
-    def world_stamp(self):
-        """存档变更戳（R10）：全部 .mca 的 mtime+size 之和。
+    def world_stamp(self, dim):
+        """维度变更集（R10）：该维度 region/entities 每个 .mca 的指纹。
 
-        region/entities 文件被外部（游戏存档）更新时变化；目录扫描
-        O(文件数)，几十个文件，微秒级——供低频轮询比对。"""
-        stamp = 0.0
-        for sub in ("", "DIM-1", "DIM1"):
-            base = os.path.join(self.save_root, sub) if sub else self.save_root
-            for kind in ("region", "entities"):
-                d = os.path.join(base, kind)
-                try:
-                    for name in os.listdir(d):
-                        if not name.endswith(".mca"):
-                            continue
-                        st = os.stat(os.path.join(d, name))
-                        stamp += st.st_mtime + st.st_size
-                except OSError:
-                    pass
-        return stamp
+        返回 frozenset((kind, rx, rz, mtime_ms, size))——可比较、可差集。
+        旧实现是"全部维度所有 .mca 的 mtime+size 之和"标量：游戏开着时
+        任何维度任何文件写盘都会触发**全视野**重载（实机反馈"存档模式
+        每隔几秒自动刷新"的根因）。现按维度+区域文件收敛：调度器对比
+        新旧集合得到变化的 region，只重载其覆盖的区块组。"""
+        dim = norm_dim(dim)
+        base = self._dim_base(dim)
+        out = set()
+        for kind in ("region", "entities"):
+            d = os.path.join(base, kind)
+            try:
+                for name in os.listdir(d):
+                    if not name.endswith(".mca"):
+                        continue
+                    parts = name.split(".")
+                    try:
+                        rx, rz = int(parts[1]), int(parts[2])
+                    except (IndexError, ValueError):
+                        continue
+                    st = os.stat(os.path.join(d, name))
+                    out.add((kind, rx, rz, int(st.st_mtime * 1000), st.st_size))
+            except OSError:
+                pass
+        return frozenset(out)
 
-    def invalidate(self):
-        """清全部解析缓存（R10：存档被外部更新后重扫）。
+    def invalidate(self, dim=None):
+        """清解析缓存（R10：存档被外部更新后重扫）。
 
-        region 句柄一并重开——MC 重定位区块会改写偏移表，旧句柄的
-        偏移表已过期。"""
+        dim 给定时只清该维度的区块 payload / 实体缓存并重开其 region
+        句柄（MC 重定位区块会改写偏移表，旧句柄的偏移表已过期）；
+        None 清全部（手动刷新 / 关闭时）。"""
         with self.lock:
-            for reg in self._regions.values():
-                reg.close()
-            self._regions.clear()
-            self._payloads.clear()
-            self._entities.clear()
+            for key, reg in list(self._regions.items()):
+                if dim is None or key[0] == dim:
+                    reg.close()
+                    del self._regions[key]
+            for key in list(self._payloads):
+                if dim is None or key[0] == dim:
+                    del self._payloads[key]
+            for key in list(self._entities):
+                if dim is None or key[0] == dim:
+                    del self._entities[key]
 
     # ------------------------------------------------------------ 区块 ----
     def _clip(self, dim, ymin, ymax):
@@ -641,15 +655,22 @@ class SaveClient:
         # 存档为静态数据：版本恒 0，不触发重载（自动更新走 world_stamp，R10）
         return {(cx, cz): 0 for cx in range(cx0, cx1 + 1) for cz in range(cz0, cz1 + 1)}
 
-    def world_stamp(self):
-        """存档变更戳（R10 自动更新：文件被外部改动时变化）。"""
-        return self.world.world_stamp()
+    def world_stamp(self, dim):
+        """维度变更集（R10 自动更新：该维度 .mca 指纹集合，见 AnvilWorld）。"""
+        return self.world.world_stamp(dim)
 
-    def invalidate(self):
-        """清存档解析/网格缓存（手动刷新或变更戳变化时调用）。"""
-        self.world.invalidate()
+    def invalidate(self, dim=None):
+        """清存档解析/网格缓存（手动刷新或变更集变化时调用）。
+
+        dim 给定时只清该维度（其他维度的缓存与句柄保留）。"""
+        self.world.invalidate(dim)
         with self.world.lock:
-            self._mesh_cache.clear()
+            if dim is None:
+                self._mesh_cache.clear()
+            else:
+                for key in list(self._mesh_cache):
+                    if key[0] == dim:
+                        del self._mesh_cache[key]
 
     def texture_png(self, block, face):
         return procedural_png(block, face)

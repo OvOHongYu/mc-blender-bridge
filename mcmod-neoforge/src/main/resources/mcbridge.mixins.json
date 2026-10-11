@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "package": "com.zcube.mcbridge.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "minVersion": "0.8",
+  "mixins": ["WorldChunkMixin"],
+  "client": ["MultiBufferSourceMixin", "MinecraftTickMixin",
+    "BlockEntityStorageMixin", "InstancerProviderImplMixin",
+    "BaseInstancerMixin", "IndirectInstancerMixin"],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

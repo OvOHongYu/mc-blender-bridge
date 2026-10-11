@@ -1,0 +1,461 @@
+package com.zcube.mcbridge.http;
+
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import com.zcube.mcbridge.McBridge;
+import com.zcube.mcbridge.core.ChunkSnapshotService;
+import com.zcube.mcbridge.core.VersionTracker;
+import com.zcube.mcbridge.codec.Mcc1Writer;
+import com.zcube.mcbridge.codec.Mcm1Writer;
+import com.zcube.mcbridge.codec.Payloads;
+import com.zcube.mcbridge.tex.TextureService;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.zip.Deflater;
+
+/**
+ * 嵌入式 HTTP API（JDK 自带 HttpServer，零第三方依赖），仅绑定 127.0.0.1。
+ * （NeoForge / Mojmap 版；端点与响应与 Fabric 版完全一致。）
+ *
+ * 端点与 docs/协议规范.md 一致:
+ *   GET /api/ping                        能力协商（JSON）
+ *   GET /api/blocks                      方块分类表（JSON）
+ *   GET /api/chunk?dim&cx&cz&ymin&ymax   MCC1（zlib）
+ *   GET /api/mesh?...&lod&ao&leaves      MCM1（zlib）
+ *   GET /api/entities?dim&cx&cz         实体列表（JSON；R5 画/盔甲架）
+ *   GET /api/versions?dim&cx0&cz0&cx1&cz1 版本表（zlib）
+ *   GET /api/worldrev                    全局修订号（R10）
+ *   GET /api/texture?block&face          PNG（不压缩）
+ */
+public final class ApiServer {
+    private final HttpServer http;
+    private final MinecraftServer server;
+    private final ChunkSnapshotService snapshots;
+    private final TextureService textures;
+
+    public ApiServer(MinecraftServer server, int port) throws IOException {
+        this.server = server;
+        this.snapshots = new ChunkSnapshotService(server);
+        this.textures = new TextureService();
+        http = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 64);
+        http.createContext("/api", this::route);
+        http.setExecutor(Executors.newFixedThreadPool(8));
+    }
+
+    public void start() {
+        http.start();
+    }
+
+    public void stop() {
+        http.stop(0);
+    }
+
+    private void route(HttpExchange ex) throws IOException {
+        try {
+            String path = ex.getRequestURI().getPath();
+            Query q = new Query(ex.getRequestURI().getRawQuery());
+            switch (path) {
+                case "/api/ping" -> ping(ex);
+                case "/api/blocks" -> blocks(ex);
+                case "/api/player" -> {
+                    if (ex.getRequestMethod().equals("POST")) {
+                        playerSet(ex, q);
+                    } else {
+                        player(ex);
+                    }
+                }
+                case "/api/chunk" -> chunk(ex, q);
+                case "/api/mesh" -> mesh(ex, q);
+                case "/api/entities" -> entities(ex, q);
+                case "/api/versions" -> versions(ex, q);
+                case "/api/worldrev" -> worldrev(ex);
+                case "/api/texture" -> texture(ex, q);
+                case "/api/capture" -> capture(ex, q);
+                case "/api/capture/result" -> captureResult(ex);
+                case "/api/capture/sprites" -> captureSprites(ex);
+                case "/api/block" -> blockAt(ex, q);
+                default -> json(ex, 404, "{\"error\":\"not found\"}");
+            }
+        } catch (BusyException e) {
+            json(ex, 429, "{\"error\":\"snapshot queue full, retry later\"}");
+        } catch (Exception e) {
+            McBridge.LOGGER.error("API 处理失败: {}", ex.getRequestURI(), e);
+            json(ex, 500, "{\"error\":" + jsonString(String.valueOf(e)) + "}");
+        } finally {
+            ex.close();
+        }
+    }
+
+    private void ping(HttpExchange ex) throws IOException {
+        StringBuilder dims = new StringBuilder();
+        for (var w : server.getAllLevels()) {
+            if (dims.length() > 0) {
+                dims.append(',');
+            }
+            dims.append("{\"id\":\"").append(w.dimension().location())
+                    .append("\",\"minY\":").append(ChunkSnapshotService.WORLD_MIN_Y)
+                    .append(",\"height\":").append(ChunkSnapshotService.WORLD_HEIGHT).append('}');
+        }
+        String body = ("{\"mod\":\"mcbridge\",\"modVersion\":\"1.0.0\",\"mcVersion\":\""
+                + server.getServerVersion() + "\",\"encodings\":[2],\"modes\":[\"raw\",\"mesh\"],"
+                + "\"entities\":true,"
+                + "\"dims\":[" + dims + "],\"maxQuads\":200000}");
+        json(ex, 200, body);
+    }
+
+    /** 玩家状态（单人/第一玩家）：位置 + 视角，供 Blender 相机同步。 */
+    private void player(HttpExchange ex) throws IOException {
+        var players = server.getPlayerList().getPlayers();
+        if (players.isEmpty()) {
+            json(ex, 200, "{\"player\":null}");
+            return;
+        }
+        ServerPlayer p0 = players.get(0);
+        String dim = p0.level().dimension().location().toString();
+        double x = p0.getX(), y = p0.getY(), z = p0.getZ();
+        float yaw = p0.getYRot(), pitch = p0.getXRot();
+        String body = ("{\"dim\":\"" + dim + "\",\"x\":" + x + ",\"y\":" + y
+                + ",\"z\":" + z + ",\"yaw\":" + yaw + ",\"pitch\":" + pitch + "}");
+        json(ex, 200, body);
+    }
+
+    /** POST /api/player：把玩家传送到指定位置与视角（Blender 相机 -> 玩家）。 */
+    private void playerSet(HttpExchange ex, Query q) throws IOException {
+        var players = server.getPlayerList().getPlayers();
+        if (players.isEmpty()) {
+            json(ex, 200, "{\"ok\":false,\"error\":\"no player\"}");
+            return;
+        }
+        ServerPlayer p0 = players.get(0);
+        double x = q.getDouble("x", p0.getX());
+        double y = q.getDouble("y", p0.getY());
+        double z = q.getDouble("z", p0.getZ());
+        float yaw = (float) q.getDouble("yaw", p0.getYRot());
+        float pitch = (float) q.getDouble("pitch", p0.getXRot());
+        // 必须在 server 线程执行（sendPacket / 区块加载线程安全），等待完成。
+        // 1.21.1: ServerGamePacketListenerImpl.teleport(x,y,z,yaw,pitch,Set<RelativeMovement>)
+        // —— 传送包本身携带 yaw/pitch，无需再 setRot（Entity.setRot 是 protected）。
+        Boolean ok = snapshots.snapshot(() -> {
+            p0.connection.teleport(x, y, z, yaw, pitch, java.util.Set.of());
+            return Boolean.TRUE;
+        });
+        if (ok == null) {
+            json(ex, 429, "{\"ok\":false,\"error\":\"server busy\"}");
+            return;
+        }
+        json(ex, 200, "{\"ok\":true}");
+    }
+
+    private void blocks(HttpExchange ex) throws IOException {
+        StringBuilder sb = new StringBuilder("{\"blocks\":{");
+        boolean first = true;
+        // lights（R6）：所有亮度 > 0 的方块状态（逐状态精确、含模组方块），
+        // 供插件给发光方块追加 Emission。只有一小部分状态有亮度，体积可控。
+        StringBuilder lights = new StringBuilder();
+        boolean lfirst = true;
+        for (var entry : BuiltInRegistries.BLOCK.entrySet()) {
+            var state = entry.getValue().defaultBlockState();
+            int cls = com.zcube.mcbridge.mesh.BlockClassifier.classify(state);
+            String id = BuiltInRegistries.BLOCK.getKey(entry.getValue()).toString();
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append(jsonString(id)).append(":{\"class\":").append(cls)
+                    .append(",\"tint\":null,\"color\":[0.6,0.6,0.6]}");
+            for (var s : entry.getValue().getStateDefinition().getPossibleStates()) {
+                int lum = s.getLightEmission();
+                if (lum <= 0) {
+                    continue;
+                }
+                if (!lfirst) {
+                    lights.append(',');
+                }
+                lfirst = false;
+                // 键与调色板状态名同构（stateName：id[排序 k=v]，值用
+                // Property.name）——不能用 State.toString()（带 Block{} 前缀，
+                // 且模组枚举会退化成大写 toString）
+                lights.append(jsonString(
+                        com.zcube.mcbridge.core.ChunkSnapshotService.stateName(s)))
+                        .append(':').append(lum);
+            }
+        }
+        sb.append("},\"lights\":{").append(lights)
+                .append("},\"nBlocks\":").append(BuiltInRegistries.BLOCK.size()).append('}');
+        json(ex, 200, sb.toString());
+    }
+
+    private void chunk(HttpExchange ex, Query q) throws IOException {
+        String dim = q.get("dim", "minecraft:overworld");
+        int cx = q.getInt("cx"), cz = q.getInt("cz");
+        int ymin = q.getInt("ymin", ChunkSnapshotService.WORLD_MIN_Y);
+        int ymax = q.getInt("ymax", ChunkSnapshotService.WORLD_MIN_Y + ChunkSnapshotService.WORLD_HEIGHT);
+        // withBiome=true：/api/chunk 供模式 A 本地网格按群系染色（MCC1 v2，R8）
+        var payload = snapshots.snapshot(() -> snapshots.payload(dim, cx, cz, ymin, ymax, true));
+        if (payload == null) {
+            throw new BusyException();
+        }
+        byte[] body = zlib(Mcc1Writer.write(payload));
+        binary(ex, 200, body, "application/octet-stream", 2);
+    }
+
+    private void mesh(HttpExchange ex, Query q) throws IOException {
+        String dim = q.get("dim", "minecraft:overworld");
+        int cx = q.getInt("cx"), cz = q.getInt("cz");
+        int ymin = q.getInt("ymin", ChunkSnapshotService.WORLD_MIN_Y);
+        int ymax = q.getInt("ymax", ChunkSnapshotService.WORLD_MIN_Y + ChunkSnapshotService.WORLD_HEIGHT);
+        int lod = q.getInt("lod", 0);
+        boolean ao = !"0".equals(q.get("ao", lod == 0 ? "1" : "0"));
+        boolean fast = "fast".equals(q.get("leaves", "fancy"));
+        var meshed = snapshots.snapshot(() ->
+                snapshots.mesh(dim, cx, cz, ymin, ymax, lod, ao, fast));
+        if (meshed == null) {
+            throw new BusyException();
+        }
+        List<Payloads.PalEntry> pal = meshed.palette();
+        List<Payloads.Quad> quads = meshed.quads();
+        byte[] body = zlib(Mcm1Writer.write(dim, q.getInt("cx"), q.getInt("cz"),
+                meshed.yBottom(), pal, quads, lod < 2, meshed.biomeNames()));
+        binary(ex, 200, body, "application/octet-stream", 2);
+    }
+
+    private void entities(HttpExchange ex, Query q) throws IOException {
+        String dim = q.get("dim", "minecraft:overworld");
+        int cx = q.getInt("cx"), cz = q.getInt("cz");
+        int ymin = q.getInt("ymin", ChunkSnapshotService.WORLD_MIN_Y);
+        int ymax = q.getInt("ymax", ChunkSnapshotService.WORLD_MIN_Y + ChunkSnapshotService.WORLD_HEIGHT);
+        var list = snapshots.snapshot(() -> {
+            var w = snapshots.world(dim);
+            return w == null ? null : snapshots.entities(w, cx, cz, ymin, ymax);
+        });
+        if (list == null) {
+            throw new BusyException();
+        }
+        StringBuilder sb = new StringBuilder("{\"entities\":[");
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(jsonVal(list.get(i)));
+        }
+        sb.append("]}");
+        json(ex, 200, sb.toString());
+    }
+
+    private void versions(HttpExchange ex, Query q) throws IOException {
+        String dim = q.get("dim", "minecraft:overworld");
+        int cx0 = q.getInt("cx0"), cz0 = q.getInt("cz0");
+        int cx1 = q.getInt("cx1"), cz1 = q.getInt("cz1");
+        var out = new java.io.ByteArrayOutputStream();
+        u32le(out, (cx1 - cx0 + 1) * (cz1 - cz0 + 1));
+        for (int cx = cx0; cx <= cx1; cx++) {
+            for (int cz = cz0; cz <= cz1; cz++) {
+                final int fcx = cx, fcz = cz;
+                snapshots.snapshot(() -> {
+                    snapshots.world(dim).getChunk(fcx, fcz, ChunkStatus.FULL, true);
+                    return null;
+                });
+                i32le(out, cx);
+                i32le(out, cz);
+                i64le(out, VersionTracker.get(dim, cx, cz));
+            }
+        }
+        binary(ex, 200, zlib(out.toByteArray()), "application/octet-stream", 2);
+    }
+
+    /** R10 事件驱动：全局世界修订号（任一方块变更 +1）。
+     *  插件轮询此单整数（开销≈0），变更才做逐组版本扫描。 */
+    private void worldrev(HttpExchange ex) throws IOException {
+        json(ex, 200, "{\"rev\":" + VersionTracker.worldRev() + "}");
+    }
+
+    private void texture(HttpExchange ex, Query q) throws IOException {
+        String block = q.get("block", "minecraft:stone");
+        String face = q.get("face", "side");
+        byte[] png = textures.png(block, face);
+        binary(ex, 200, png, "image/png", 0);
+    }
+
+    // ------------------------------------------------- R17 运行时几何捕获 ----
+
+    /**
+     * GET /api/capture?x&y&z&r&ms：开启一段捕获窗口。
+     *
+     * <p>几何记录发生在客户端渲染线程（{@code MultiBufferSourceMixin}）——单人游戏里
+     * 客户端与集成服务端同 JVM，共享同一份静态状态，因此这里 arm 即可。
+     * 相机位置先用服务端已知的玩家眼位估计（客户端会在第一帧用真实相机覆盖）。
+     */
+    private void capture(HttpExchange ex, Query q) throws IOException {
+        double x = q.getDouble("x", 0);
+        double y = q.getDouble("y", 0);
+        double z = q.getDouble("z", 0);
+        double r = q.getDouble("r", 2.5);
+        int ms = q.getInt("ms", 1500);
+        var players = server.getPlayerList().getPlayers();
+        double camX = x, camY = y, camZ = z;
+        if (!players.isEmpty()) {
+            ServerPlayer p0 = players.get(0);
+            camX = p0.getX();
+            camY = p0.getEyeY();
+            camZ = p0.getZ();
+        }
+        com.zcube.mcbridge.capture.GeometryCapture.arm(x, y, z, r, ms, camX, camY, camZ);
+        json(ex, 200, "{\"ok\":true,\"status\":" + jsonString(
+                com.zcube.mcbridge.capture.GeometryCapture.statusLine()) + "}");
+    }
+
+    /** GET /api/capture/result：最近一次捕获的 JSON 报表（未捕获返回 404）。 */
+    private void captureResult(HttpExchange ex) throws IOException {
+        String json = com.zcube.mcbridge.capture.GeometryCapture.lastJson();
+        if (json == null) {
+            json(ex, 404, "{\"error\":\"no capture yet\"}");
+            return;
+        }
+        json(ex, 200, json);
+    }
+
+    /** GET /api/capture/sprites：方块图集的 sprite 表（UV 矩形 -> 源贴图路径）。 */
+    private void captureSprites(HttpExchange ex) throws IOException {
+        String table = com.zcube.mcbridge.capture.GeometryCapture.spriteTable();
+        if (table == null) {
+            json(ex, 404, "{\"error\":\"no sprite table yet\"}");
+            return;
+        }
+        json(ex, 200, table);
+    }
+
+    /**
+     * GET /api/block?dim&x&y&z：该坐标上的方块状态名（与调色板同构，
+     * 用 {@code ChunkSnapshotService.stateName}）。
+     *
+     * <p>用途：把运行时捕获到的几何按世界坐标归属到具体方块，并拿到它的**状态**
+     * （如 {@code create:gearshift[axis=y,powered=false]}）——导出时据此把几何挂到
+     * 对应状态上。
+     */
+    private void blockAt(HttpExchange ex, Query q) throws IOException {
+        String dim = q.get("dim", "minecraft:overworld");
+        int x = q.getInt("x"), y = q.getInt("y"), z = q.getInt("z");
+        var hit = snapshots.snapshot(() -> {
+            var w = snapshots.world(dim);
+            if (w == null) {
+                return null;
+            }
+            w.getChunk(x >> 4, z >> 4, ChunkStatus.FULL, true);
+            return w.getBlockState(new net.minecraft.core.BlockPos(x, y, z));
+        });
+        if (hit == null) {
+            json(ex, 200, "{\"block\":null}");
+            return;
+        }
+        json(ex, 200, "{\"block\":" + jsonString(
+                ChunkSnapshotService.stateName(hit)) + ",\"air\":" + hit.isAir() + "}");
+    }
+
+    // ------------------------------------------------------------ 工具 ----
+
+    private static void json(HttpExchange ex, int code, String body) throws IOException {
+        byte[] b = body.getBytes(StandardCharsets.UTF_8);
+        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.sendResponseHeaders(code, b.length);
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(b);
+        }
+    }
+
+    private static void binary(HttpExchange ex, int code, byte[] body,
+                               String ctype, int enc) throws IOException {
+        ex.getResponseHeaders().set("Content-Type", ctype);
+        ex.getResponseHeaders().set("X-MCB-Encoding", enc > 0 ? String.valueOf(enc) : "none");
+        ex.sendResponseHeaders(code, body.length);
+        try (OutputStream os = ex.getResponseBody()) {
+            os.write(body);
+        }
+    }
+
+    private static byte[] zlib(byte[] data) {
+        Deflater def = new Deflater(6);
+        def.setInput(data);
+        def.finish();
+        var out = new java.io.ByteArrayOutputStream(data.length / 2);
+        byte[] buf = new byte[1 << 15];
+        while (!def.finished()) {
+            out.write(buf, 0, def.deflate(buf));
+        }
+        def.end();
+        return out.toByteArray();
+    }
+
+    private static void u32le(java.io.ByteArrayOutputStream out, int v) {
+        out.write(v & 0xFF);
+        out.write((v >> 8) & 0xFF);
+        out.write((v >> 16) & 0xFF);
+        out.write((v >> 24) & 0xFF);
+    }
+
+    private static void i32le(java.io.ByteArrayOutputStream out, int v) {
+        u32le(out, v);
+    }
+
+    private static void i64le(java.io.ByteArrayOutputStream out, long v) {
+        for (int i = 0; i < 8; i++) {
+            out.write((int) ((v >> (8 * i)) & 0xFF));
+        }
+    }
+
+    private static String jsonString(String s) {
+        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    /** 递归 JSON 序列化（实体端点用；null/列表/map/数字/布尔）。 */
+    private static String jsonVal(Object v) {
+        if (v == null) {
+            return "null";
+        }
+        if (v instanceof String s) {
+            return jsonString(s);
+        }
+        if (v instanceof Boolean b) {
+            return b ? "true" : "false";
+        }
+        if (v instanceof Number n) {
+            return n.toString();
+        }
+        if (v instanceof List<?> l) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < l.size(); i++) {
+                if (i > 0) {
+                    sb.append(',');
+                }
+                sb.append(jsonVal(l.get(i)));
+            }
+            return sb.append(']').toString();
+        }
+        if (v instanceof Map<?, ?> mm) {
+            StringBuilder sb = new StringBuilder("{");
+            boolean first = true;
+            for (var e : mm.entrySet()) {
+                if (!first) {
+                    sb.append(',');
+                }
+                first = false;
+                sb.append(jsonString(String.valueOf(e.getKey()))).append(':')
+                  .append(jsonVal(e.getValue()));
+            }
+            return sb.append('}').toString();
+        }
+        return "null";
+    }
+
+    private static final class BusyException extends RuntimeException {
+    }
+}

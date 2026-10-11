@@ -8,6 +8,12 @@ mcmod/build/
 mcmod/.gradle/
 mcmod/run/
 mcmod/logs/
+mcmod-neoforge/build/
+mcmod-neoforge/.gradle/
+mcmod-neoforge/.eclipse/
+mcmod-neoforge/.vscode/
+mcmod-neoforge/run/
+mcmod-neoforge/logs/
 *.class
 
 # Blender

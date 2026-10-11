@@ -40,6 +40,9 @@ jobs:
       - name: 构建 + 一致性对拍（conformanceTest 挂在 check 上）
         working-directory: mcmod
         run: gradle build --no-daemon
+      - name: 构建 NeoForge 模组（MDG 会现场处理 NeoForm，首次较慢）
+        working-directory: mcmod-neoforge
+        run: gradle build --no-daemon
       - name: 打包发行产物
         run: python tools/pack_release.py
       - uses: actions/upload-artifact@v4

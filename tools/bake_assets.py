@@ -57,6 +57,7 @@ jar 直接调用原版模型工厂导出（缺失时退回简化代理模型）�
 依赖: Pillow（`pip install pillow`）。工具仅构建期使用，不随插件分发。
 """
 import argparse
+import copy
 import glob
 import io
 import json
@@ -79,11 +80,11 @@ _VERT_SCALE = 16               # v2 写入倍数：1/16 单位 × 16 = 1/256 方
 _I16_MIN, _I16_MAX = -32768, 32767
 
 # 烘焙期统计（诊断「导出失效」：贴图缺失会让面被丢弃；近似几何方块另出清单）
-_STATS = {"faces": 0, "tex_miss": 0, "approx_blocks": []}
+_STATS = {"faces": 0, "tex_miss": 0, "approx_blocks": [], "obj_poly": 0}
 
 
 def _reset_stats():
-    _STATS["faces"] = _STATS["tex_miss"] = 0
+    _STATS["faces"] = _STATS["tex_miss"] = _STATS["obj_poly"] = 0
     del _STATS["approx_blocks"][:]
 
 # 面方向编码（与 core/mesher.py 一致）: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z
@@ -209,6 +210,19 @@ def blockstate_resource_path(block):
     return "assets/%s/blockstates/%s.json" % (ns, path)
 
 
+def obj_resource_path(name):
+    """`neoforge:obj` 的 model 字段 -> 资源路径。
+
+    该字段的值本身已含 `models/` 前缀（如 `create:models/block/x/y.obj`），
+    故直接拼 `assets/<ns>/<path>`，**不能**复用 model_resource_path
+    （那个会再补一次 `models/` 并改成 .json）。"""
+    if ":" in name:
+        ns, path = name.split(":", 1)
+    else:
+        ns, path = "minecraft", name
+    return "assets/%s/%s" % (ns, path)
+
+
 # ------------------------------------------------------------ 模型 ----
 class ModelLoader:
     def __init__(self, pack):
@@ -216,8 +230,13 @@ class ModelLoader:
         self._cache = {}
 
     def load(self, name, depth=0):
-        """返回 {'textures': {var: ref}, 'elements': [...], 'tex_size': (w,h)}
-        （父链已合并；tex_size 缺省继承父模型，默认 16×16）。"""
+        """返回 {'textures': {var: ref}, 'elements': [...], 'tex_size': (w,h),
+                'obj_quads': [...], 'obj_flip_v': bool}
+        （父链已合并；tex_size 缺省继承父模型，默认 16×16）。
+
+        `obj_quads` 非 None 表示该模型链的几何来自 `neoforge:obj` 的 .obj
+        （此时 elements 为 None），由 build_model_quads 的对应分支展开——
+        OBJ 的顶点是任意位置，无法用 from/to 盒表达，故不转成 elements。"""
         if name in self._cache:
             return self._cache[name]
         if depth > 32:
@@ -228,6 +247,8 @@ class ModelLoader:
             return None
         textures = {}
         elements = raw.get("elements")
+        obj_quads = None
+        obj_flip_v = False
         tex_size = (16.0, 16.0)
         parent = raw.get("parent")
         if parent:
@@ -236,6 +257,9 @@ class ModelLoader:
                 textures.update(base["textures"])
                 if elements is None:
                     elements = base["elements"]
+                if base.get("obj_quads"):
+                    obj_quads = base["obj_quads"]
+                    obj_flip_v = base.get("obj_flip_v", False)
                 tex_size = base["tex_size"]
         textures.update(raw.get("textures") or {})
         ts = raw.get("texture_size")
@@ -244,18 +268,170 @@ class ModelLoader:
                 tex_size = (float(ts), float(ts))
             else:
                 tex_size = (float(ts[0]), float(ts[1]))
-        out = {"textures": textures, "elements": elements, "tex_size": tex_size}
+        loader = raw.get("loader")
+        if loader == "neoforge:obj":
+            # 本层声明 OBJ：几何在 .obj 里，覆盖父链的 elements
+            obj_quads = self._parse_obj(raw)
+            obj_flip_v = bool(raw.get("flip_v", False))
+            elements = None
+        elif loader == "neoforge:composite":
+            # 复合模型：children 各是一份完整子模型，展开成同一份 elements
+            elements = self._composite_elements(raw, textures, depth)
+            obj_quads = None
+        out = {"textures": textures, "elements": elements, "tex_size": tex_size,
+               "obj_quads": obj_quads, "obj_flip_v": obj_flip_v}
         self._cache[name] = out
         return out
 
+    # -------------------------------------------------- OBJ（R12） ----
+    def _parse_obj(self, raw):
+        """解析 `neoforge:obj` 的 .obj + .mtl。
+
+        返回 [(verts(4,3), dir, texref, uvs(4,2))]：
+          - verts 为 1/16 方块单位（OBJ 用 0~1 方块单位，×16）；
+          - uvs 保留 OBJ 原始 (u, v)（v 自底向上），flip_v 的翻转留给
+            build_model_quads（与 elements 分支的归一化/翻转集中在一处）；
+          - texref 是 mtl 的 map_Kd 值（`#变量` 或具体贴图名），仍在
+            build_model_quads 里按**合并后**的纹理槽解析——OBJ 常被多个
+            blockstate 复用（如 16 色阀门把手共用一份 .obj，靠 `#3` 换色）。
+
+        只接受三角/四边形面（Blender 导出即四边形）。顶点顺序沿用 OBJ 的
+        外向 CCW 约定，与 elements 分支一致。"""
+        model_ref = raw.get("model")
+        if not model_ref:
+            return None
+        obj_path = obj_resource_path(model_ref)
+        data = self.pack.read(obj_path)
+        if data is None:
+            return None
+        base_dir = obj_path.rsplit("/", 1)[0]
+        verts, uvs, norms = [], [], []
+        faces = []
+        mtllibs = []
+        cur_mtl = None
+        for line in data.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            tag = parts[0]
+            if tag == "v" and len(parts) >= 4:
+                verts.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            elif tag == "vt" and len(parts) >= 3:
+                uvs.append((float(parts[1]), float(parts[2])))
+            elif tag == "vn" and len(parts) >= 4:
+                norms.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            elif tag == "usemtl":
+                cur_mtl = parts[1] if len(parts) > 1 else None
+            elif tag == "mtllib" and len(parts) > 1:
+                mtllibs.append(" ".join(parts[1:]))
+            elif tag == "f" and len(parts) >= 4:
+                faces.append((cur_mtl, parts[1:]))
+        mtl_map = {}
+        for lib in mtllibs:
+            mtl_map.update(self._parse_mtl(base_dir + "/" + lib))
+        if raw.get("mtl_override"):
+            mtl_map.update(self._parse_mtl(
+                obj_resource_path(raw["mtl_override"])))
+        ns = model_ref.split(":", 1)[0] if ":" in model_ref else "minecraft"
+        out = []
+        for mtl_name, toks in faces:
+            if len(toks) not in (3, 4):
+                _STATS["obj_poly"] += 1
+                continue
+            q_verts, q_uvs = [], []
+            for tok in toks:
+                bits = tok.split("/")
+                vi = _obj_index(bits[0], len(verts))
+                vti = _obj_index(bits[1], len(uvs)) if len(bits) > 1 and bits[1] else None
+                if vi is None:
+                    break
+                q_verts.append(tuple(c * 16.0 for c in verts[vi]))
+                q_uvs.append(uvs[vti] if vti is not None else (0.0, 0.0))
+            if len(q_verts) != len(toks):
+                continue
+            if len(q_verts) == 3:            # 三角形 -> 退化四边形（末点重复）
+                q_verts.append(q_verts[-1])
+                q_uvs.append(q_uvs[-1])
+            ref = mtl_map.get(mtl_name)
+            if ref is None:
+                ref = "#0"                   # 无材质声明：退回常见默认槽
+            d = _dir_of_face(q_verts, norms, toks, len(norms))
+            out.append((q_verts, d, _normalize_mtl_ref(ref, ns), q_uvs))
+        return out
+
+    def _parse_mtl(self, path):
+        """`.mtl` -> {材质名: map_Kd 值}。
+
+        Blender 导出的 Create 材质写的是 `map_Kd #3`（指向模型 JSON 的纹理
+        变量），也可能是具体贴图名或相对路径。"""
+        data = self.pack.read(path)
+        if data is None:
+            return {}
+        out = {}
+        cur = None
+        for line in data.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if parts[0] == "newmtl" and len(parts) > 1:
+                cur = parts[1]
+                out.setdefault(cur, None)
+            elif parts[0] in ("map_Kd", "map_kd") and cur is not None and len(parts) > 1:
+                out[cur] = " ".join(parts[1:])
+        return out
+
+    def _composite_elements(self, raw, textures, depth):
+        """`neoforge:composite` -> 展开 children 为一份 elements 列表。
+
+        每个 child 是完整子模型（自带 textures/elements/parent）。**必须把
+        child 的面贴图引用就地解析成具体贴图名**再合并：合并后共用一份
+        纹理槽，而各 child 普遍都用 `#0`/`#1`，不固化就会互相覆盖。"""
+        merged = []
+
+        def emit(elements, tex):
+            for el in (elements or []):
+                el2 = copy.deepcopy(el)
+                for f in (el2.get("faces") or {}).values():
+                    f["texture"] = ModelLoader.resolve_texture(
+                        {"textures": tex}, f.get("texture"))
+                merged.append(el2)
+
+        for child in (raw.get("children") or {}).values():
+            if not isinstance(child, dict):
+                continue
+            ctex = dict(textures)
+            cparent = child.get("parent")
+            if cparent:
+                base = self.load(cparent, depth + 1)
+                if base is not None:
+                    ct = dict(base["textures"])
+                    ct.update(ctex)
+                    ctex = ct
+                    if child.get("elements") is None:
+                        emit(base.get("elements"), ctex)
+            ctex.update(child.get("textures") or {})
+            emit(child.get("elements"), ctex)
+        emit(raw.get("elements"), textures)
+        return merged
+
     @staticmethod
     def resolve_texture(model, ref, depth=0):
-        """'#all' -> ... -> 'minecraft:block/oak_planks'；失败返回 None。"""
-        if ref is None or depth > 16:
+        """'#all' -> ... -> 'minecraft:block/oak_planks'；失败返回 None。
+
+        兼容 1.21 原版部分模型的写法（如 `heavy_core` 的 `"all"`，缺 `#`）：
+        引用不含 `/`/`:` 且恰好命中纹理变量名时，按变量解析。"""
+        if ref is None or depth > 16 or not isinstance(ref, str):
             return None
-        if isinstance(ref, str) and ref.startswith("#"):
-            nxt = model["textures"].get(ref[1:])
+        tex = model.get("textures") or {}
+        if ref.startswith("#"):
+            nxt = tex.get(ref[1:])
+            if nxt is None:
+                return None
             return ModelLoader.resolve_texture(model, nxt, depth + 1)
+        if "/" not in ref and ":" not in ref and ref in tex:
+            return ModelLoader.resolve_texture(model, tex[ref], depth + 1)
         return ref
 
 
@@ -352,6 +528,9 @@ def build_model_quads(model, texid_of, xr=0, yr=0, uvlock=False):
 
     xr/yr/uvlock 仅在 blockstate 声明 uvlock=true 时用于把 UV 矩形锁到世界方向
     （几何仍由 apply_variant_transform 旋转）。"""
+    if model.get("obj_quads"):
+        # `neoforge:obj`：几何在 .obj 里（R12），走独立的展开分支
+        return _obj_quads_out(model, texid_of)
     out = []
     # Java 模型 UV 始终以 0..16 为单位（texture_size 仅声明纹理像素尺寸，
     # 按 texture_size/16 缩放后归一化会抵消），因此统一除以 16。
@@ -432,6 +611,95 @@ def _dedupe_coincident(quads):
         seen.add(key)
         out.append(q)
     return out
+
+
+# ------------------------------------------------- OBJ（R12） ----
+def _obj_index(tok, count):
+    """OBJ 索引 -> 0 基下标；解析失败或越界返回 None。
+
+    OBJ 索引是 1 基，负数表示从末尾倒数（-1 = 最后一个）。"""
+    try:
+        i = int(tok)
+    except (TypeError, ValueError):
+        return None
+    if i > 0:
+        i -= 1
+    elif i < 0:
+        i += count
+    else:
+        return None
+    return i if 0 <= i < count else None
+
+
+def _dir_of_face(verts, norms, toks, n_norms):
+    """面的方向编码（0..5，与 DIR_VEC 一致）：优先用 OBJ 的 vn，无则用顶点叉积。
+
+    OBJ 允许斜向量，而资产包的 quad 只带一个离散方向（用于朝向/背面判断），
+    故取法线**主导轴**。"""
+    n = None
+    if n_norms:
+        acc = [0.0, 0.0, 0.0]
+        got = False
+        for tok in toks:
+            bits = tok.split("/")
+            if len(bits) > 2 and bits[2]:
+                idx = _obj_index(bits[2], n_norms)
+                if idx is not None:
+                    for i in range(3):
+                        acc[i] += norms[idx][i]
+                    got = True
+        if got:
+            n = acc
+    if n is None:
+        a, b, c = verts[0], verts[1], verts[2]
+        u = [b[i] - a[i] for i in range(3)]
+        v = [c[i] - a[i] for i in range(3)]
+        n = [u[1] * v[2] - u[2] * v[1],
+             u[2] * v[0] - u[0] * v[2],
+             u[0] * v[1] - u[1] * v[0]]
+    ax = max(range(3), key=lambda i: abs(n[i]))
+    sign = n[ax] >= 0
+    return {0: (0, 1), 1: (2, 3), 2: (4, 5)}[ax][0 if sign else 1]
+
+
+def _normalize_mtl_ref(ref, ns):
+    """`.mtl` 的 map_Kd 值 -> 贴图引用。
+
+    `#变量`（Create 的写法）与具体贴图名（含 `:`）原样返回；相对路径
+    （如 `block/x.png`）补上 .obj 所在命名空间并去掉扩展名。"""
+    if not isinstance(ref, str) or not ref:
+        return None
+    if ref.startswith("#") or ":" in ref:
+        return ref
+    p = ref.replace("\\", "/")
+    if p.lower().endswith(".png"):
+        p = p[:-4]
+    return ns + ":" + p
+
+
+def _obj_quads_out(model, texid_of):
+    """OBJ 原始面 -> 统一 quad 输出格式（与 elements 分支同口径）。
+
+    UV 语义对齐 NeoForge ObjModel：`v_mc = flip_v ? 1 - v_obj : v_obj`，
+    再按 Blender 约定翻成 v 自底向上（与 build_model_quads 的 elements 分支
+    完全一致）。cull 置 0（OBJ 无 cullface 概念）。"""
+    flip = bool(model.get("obj_flip_v"))
+    out = []
+    for verts, d, ref, uvs in model["obj_quads"]:
+        _STATS["faces"] += 1
+        tex = ModelLoader.resolve_texture(model, ref)
+        if tex is None:
+            continue
+        texid = texid_of(tex)
+        if texid is None:
+            _STATS["tex_miss"] += 1
+            continue
+        ouvs = []
+        for u, v in uvs:
+            mv = v if flip else (1.0 - v)
+            ouvs.append((u, 1.0 - mv))
+        out.append((verts, d, texid, -1, 0, ouvs))
+    return _dedupe_coincident(out)
 
 
 def apply_variant_transform(quads, xr, yr, uvlock):
@@ -839,6 +1107,134 @@ def _skull_kind(base):
     return None, False
 
 
+# ------------------------------------------------- 方块实体部件（R12 方向 3）----
+# 模组里"由 BlockEntity/Flywheel 渲染器动态绘制"的部件（扇叶、钻头、搅拌头、
+# 表盘、传送带等）在 jar 里都带了**静态 JSON 模型**——不被任何 blockstate
+# 引用、仅由 BE 渲染器实例化，所以常规烘焙拿不到。这里按方块状态把对应模型
+# 叠加进变体几何（静态姿态近似运动部件）：
+#   - when:    按变体属性选择模型（键值匹配，元组=多值；顺序匹配、首中即停）
+#   - pre_rot: 部件模型制作姿态 -> block 模型姿态的对齐旋转（BE 用自己的变换
+#              对齐，这里预先转好，随后与 block 几何一起吃 blockstate 的 x/y）
+#   - copy_rot: BE 多实例渲染的部件（风扇 4 叶），绕轴复制 N 份（每份转 step*i）
+# 姿态强依赖运行时的部件（机械臂关节、部署器手、绳索长度等）不做静态近似——
+# 坐标按 BE pivot 摆放无法从模型 JSON 恢复，见 roadmap 方向 1/3 的结论。
+# 半轴部件（`create:block/shaft_half`）：模型沿 +Z 制作（z 8..16，截面 x/y 6..10，
+# 端面朝 +Z）。绕 X 轴 ∓90°、原点取方块中心，即得 ∓Y 方向的半轴——这是
+# gearshift / clutch / 齿轮箱等「制作姿态为 axis=Y」的方块里那根中间轴。
+_SH_UP = {"model": "create:block/shaft_half", "pre_rot": (0, -90.0, (8.0, 8.0, 8.0))}
+_SH_DOWN = {"model": "create:block/shaft_half", "pre_rot": (0, 90.0, (8.0, 8.0, 8.0))}
+_SHAFT_HALF_Y = (_SH_UP, _SH_DOWN)
+
+# 安山/黄铜齿轮箱：轴的有无由 top_shaft / bottom_shaft 状态决定（EncasedCogRenderer）
+_ENCASED_COG_SHAFTS = (
+    {"when": {"top_shaft": "true"}, "model": "create:block/shaft_half",
+     "pre_rot": (0, -90.0, (8.0, 8.0, 8.0))},
+    {"when": {"bottom_shaft": "true"}, "model": "create:block/shaft_half",
+     "pre_rot": (0, 90.0, (8.0, 8.0, 8.0))},
+)
+
+_BE_PARTS = {
+    # 传送带：整条由 BeltVisual 滚动渲染。平面段分「上半圈」belt/{start,middle,end}
+    # 与「下半圈」belt/*_bottom（回程），两者拼成完整的皮带环；斜段
+    # belt/diagonal_* 自带上下两圈，故与平面段**互斥**（slope 决定取哪一支）。
+    # slope=vertical 的竖起由 blockstate x=90 完成、sideways 的翻面由 x=180
+    # 完成，均复用平面模型；part=pulley 额外叠 belt_pulley（木质皮带轮 + 轴）。
+    "create:belt": (
+        {"when": {"part": "start", "slope": ("upward", "downward")},
+         "model": "create:block/belt/diagonal_start"},
+        {"when": {"part": "start", "slope": ("horizontal", "sideways", "vertical")},
+         "model": "create:block/belt/start"},
+        {"when": {"part": "start", "slope": ("horizontal", "sideways", "vertical")},
+         "model": "create:block/belt/start_bottom"},
+        {"when": {"part": "end", "slope": ("upward", "downward")},
+         "model": "create:block/belt/diagonal_end"},
+        {"when": {"part": "end", "slope": ("horizontal", "sideways", "vertical")},
+         "model": "create:block/belt/end"},
+        {"when": {"part": "end", "slope": ("horizontal", "sideways", "vertical")},
+         "model": "create:block/belt/end_bottom"},
+        {"when": {"part": ("pulley", "middle"), "slope": ("upward", "downward")},
+         "model": "create:block/belt/diagonal_middle"},
+        {"when": {"part": ("pulley", "middle"),
+                  "slope": ("horizontal", "sideways", "vertical")},
+         "model": "create:block/belt/middle"},
+        {"when": {"part": ("pulley", "middle"),
+                  "slope": ("horizontal", "sideways", "vertical")},
+         "model": "create:block/belt/middle_bottom"},
+        {"when": {"part": "pulley"},
+         "model": "create:block/belt_pulley",
+         # belt_pulley 是"竖直轴"制作（轴沿 Y、鼓板绕它围成方框），而水平
+         # 传送带的轮轴应垂直于带宽方向（制作姿态下带宽沿 Z，故轮轴沿 X）。
+         # 绕 Z 轴 -90°（原点取方块中心）把轴从 Y 转到 X。
+         "pre_rot": (2, -90.0, (8.0, 8.0, 8.0))},
+    ),
+    # 反转齿轮箱 / 离合器（SplitShaft）：中间半轴由 SplitShaftRenderer 画
+    # （SHAFT_HALF）。这两块模型顶/底面用半透明的 andesite_funnel_frame，
+    # 透过它能看到轴——Blender 里缺轴时就是截图那个"黑洞"。
+    # shaft_half 沿 +Z 制作（z 8..16），绕 X 轴 ±90°（原点取方块中心）得到
+    # ∓Y 半轴；该方块 blockstate 的 axis=y 无旋转，即制作姿态。
+    "create:gearshift": _SHAFT_HALF_Y,
+    "create:clutch": _SHAFT_HALF_Y,
+    # 十字齿轮箱：GearboxRenderer 同样画 SHAFT_HALF，但朝向是**水平**的 4 个
+    # 侧面之一（轮询供电方向，GearboxVisual 里以 SOUTH=+Z 为默认），静置烘焙
+    # 取制作默认值 +Z。顶/底是实心 andesite_casing，故轴不取 ±Y。
+    "create:gearbox": (
+        {"model": "create:block/shaft_half"},
+    ),
+    # 安山/黄铜齿轮箱（EncasedCogRenderer）：静态模型只有外壳，**齿轮本体**
+    # 与轴都由渲染器画——`SHAFTLESS_COGWHEEL` / `SHAFTLESS_LARGE_COGWHEEL`
+    # 对应 create:block/{cogwheel,large_cogwheel}_shaftless（制作姿态 axis=Y，
+    # 无需旋转）；轴由 top_shaft / bottom_shaft 状态决定（SHAFT_HALF）。
+    "create:andesite_encased_cogwheel": (
+        {"model": "create:block/cogwheel_shaftless"},) + _ENCASED_COG_SHAFTS,
+    "create:brass_encased_cogwheel": (
+        {"model": "create:block/cogwheel_shaftless"},) + _ENCASED_COG_SHAFTS,
+    "create:andesite_encased_large_cogwheel": (
+        {"model": "create:block/large_cogwheel_shaftless"},) + _ENCASED_COG_SHAFTS,
+    "create:brass_encased_large_cogwheel": (
+        {"model": "create:block/large_cogwheel_shaftless"},) + _ENCASED_COG_SHAFTS,
+    # 机壳轴（安山/黄铜）：名字就是"轴 + 外壳"，静态模型只有外壳（5 元素、
+    # 无 4x4 轴截面），轴同样是渲染器画的。
+    "create:andesite_encased_shaft": _SHAFT_HALF_Y,
+    "create:brass_encased_shaft": _SHAFT_HALF_Y,
+    # 风扇叶：propeller 按"轴沿 Z、前口朝 -Z"姿态制作，先 x=+90 转成与 block
+    # 模型一致的"变速箱在下、叶室在上"的 up 姿态，再绕 Y 轴复制 4 片
+    # （BE 里是 4 个旋转实例）。
+    "create:encased_fan": (
+        {"model": "create:block/encased_fan/propeller",
+         "pre_rot": (0, 90.0, (8.0, 8.0, 8.0)),
+         "copy_rot": (1, 90.0, (8.0, 8.0, 8.0), 4)},
+    ),
+    # 钻头：head 按"锥朝 +Z"制作，x=-90 转成与 block 模型一致的"朝上"姿态。
+    "create:mechanical_drill": (
+        {"model": "create:block/mechanical_drill/head",
+         "pre_rot": (0, -90.0, (8.0, 8.0, 8.0))},
+    ),
+    # 搅拌头：head 自带悬挂偏移（y -4..8），pole 是穿过方块顶向上延伸的
+    # 吊杆（y 7..32，金属杆），block 无朝向属性。
+    "create:mechanical_mixer": (
+        {"model": "create:block/mechanical_mixer/pole"},
+        {"model": "create:block/mechanical_mixer/head"},
+    ),
+    # 压板：head 含活塞杆（y 到 27）与压板（y 0..4），静止位姿态。
+    "create:mechanical_press": (
+        {"model": "create:block/mechanical_press/head"},
+    ),
+    # 表盘：head 是完整的表盘组件（底板 + 刻度 + 指针，位于 +X 面，与
+    # gauge/base_wall 的"朝东"姿态一致，blockstate 旋转负责其余朝向）。
+    "create:speedometer": (
+        {"model": "create:block/gauge/speedometer/head"},
+    ),
+    "create:stressometer": (
+        {"model": "create:block/gauge/stressometer/head"},
+    ),
+    # 蒸汽大炮：connector（木质支架）+ pipe（炮管，y 到 32 出界）。
+    "create:schematicannon": (
+        {"model": "create:block/schematicannon/connector"},
+        {"model": "create:block/schematicannon/pipe"},
+    ),
+}
+
+
 def _be_specs(block):
     """方块 -> 原版方块实体变体规格列表；非方块实体返回 None。"""
     base = block.split(":")[-1]
@@ -1134,8 +1530,57 @@ def build_biome_colors(pack):
     return out
 
 
+# -------------------------------------------- 运行时捕获几何（R17）----
+def _split_state_props(state_name):
+    """'ns:block[a=1,b=2]' -> {'a': '1', 'b': '2'}。"""
+    i = state_name.find("[")
+    if i < 0:
+        return {}
+    out = {}
+    for kv in state_name[i + 1:].rstrip("]").split(","):
+        k, sep, v = kv.partition("=")
+        if sep:
+            out[k.strip()] = v.strip()
+    return out
+
+
+def load_runtime_models(path):
+    """读 `tools/capture_export.py` 产出的运行时几何（机器方块的**真实渲染结果**）。
+
+    结构：
+        {"states": {"create:gearshift[axis=y,powered=false]":
+                     {"block": "create:gearshift",
+                      "quads": [{"verts": [x,y,z]*4, "uv": [u,v]*4,
+                                 "dir": 0..5, "tex": "create:block/axis"}]}}}
+
+    返回 (by_state, by_block)：
+        by_state[(block, frozenset(props))] = [quad...]   # 按状态精确挂载
+        by_block[block] = [quad...]                       # 该方块全部捕获状态的并集
+
+    坐标已是**方块局部 1/16 单位**、UV 已是**源贴图内 0..1（v 自底向上）**，
+    与静态烘焙同口径，故可直接当变体几何用。
+    """
+    if not path or not os.path.exists(path):
+        return {}, {}
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    by_state = {}
+    by_block = {}
+    for name, ent in (data.get("states") or {}).items():
+        if not isinstance(ent, dict):
+            continue
+        block = ent.get("block") or name.split("[")[0]
+        quads = ent.get("quads") or []
+        if not quads:
+            continue
+        by_state.setdefault(
+            (block, frozenset(_split_state_props(name).items())), []).extend(quads)
+        by_block.setdefault(block, []).extend(quads)
+    return by_state, by_block
+
+
 class Baker:
-    def __init__(self, pack, mc_version, only=None, overrides=None):
+    def __init__(self, pack, mc_version, only=None, overrides=None, runtime=None):
         self.pack = pack
         self.mc_version = mc_version
         self.only = set(only) if only else None
@@ -1153,6 +1598,10 @@ class Baker:
         self.paintings = []          # (name, w, h, tex)（v4 画变体表）
         self.entity_models = {}      # name -> {"texW","texH","tex","parts"}（v5）
         self.biome_colors = {}       # biome -> (grass, foliage, water) 0xRRGGBB（v6）
+        # R17 运行时捕获：机器方块的真实渲染几何（按状态/按方块）
+        self.rt_by_state = dict((runtime or ({}, {}))[0])
+        self.rt_by_block = dict((runtime or ({}, {}))[1])
+        self.rt_variants = {}        # (block, frozenset) -> idx
 
     # -------------------------------------------------- 贴图 ----
     def _ensure_texture(self, name, strip=True):
@@ -1239,13 +1688,75 @@ class Baker:
         fallback = next(t for t in tids if t is not None)
         return tuple(fallback if t is None else t for t in tids)
 
+    # ------------------------------------------- 运行时捕获变体（R17）----
+    def _rt_quads(self, quads):
+        """捕获的四边形态 -> 资产包 quad 格式 (verts, dir, texid, tint, cull, uvs)。"""
+        out = []
+        for q in quads:
+            texid = self._ensure_texture(q.get("tex"))
+            if texid is None:
+                _STATS["tex_miss"] += 1
+                continue
+            v = q.get("verts") or []
+            u = q.get("uv") or []
+            if len(v) != 12 or len(u) != 8:
+                continue
+            verts = tuple((v[i * 3], v[i * 3 + 1], v[i * 3 + 2]) for i in range(4))
+            uvs = tuple((u[i * 2], u[i * 2 + 1]) for i in range(4))
+            out.append((verts, int(q.get("dir", 2)), texid, -1, 0, uvs))
+        return out
+
+    def _rt_variant(self, block, props, extra=()):
+        """按**方块状态**取运行时捕获几何建变体；没有该状态返回 None。
+
+        运行时候补的是"渲染器真正画出来的东西"。但机器方块常是**静态底座 + 运行时
+        运动部件**两段（如机械压床的机架是静态模型、压头是 Flywheel 画的），故把该
+        状态的**静态模型几何**（`extra`，仅在确有 elements 时给出）一并叠上，避免
+        丢掉底座。"""
+        key = (block, frozenset((props or {}).items()))
+        if key in self.rt_variants:
+            return self.rt_variants[key]
+        raw = self.rt_by_state.get(key)
+        if not raw:
+            return None
+        quads = list(extra) + self._rt_quads(raw)
+        if not quads:
+            return None
+        idx = len(self.variant_list)
+        self.variant_list.append(quads)
+        # 机器方块按非完整立方体处理（use_model=1 → 网格器注入这类几何）
+        self.variant_info.append(self._variant_meta(
+            block, {"elements": []}, quads, quads))
+        self.rt_variants[key] = idx
+        return idx
+
+    def _static_model_quads(self, apply_node, block=None):
+        """blockstate 节点指向的**静态模型**几何（含 x/y 变换）。
+
+        只取"真实存在"的静态几何：模型无 elements 返回 []（不叠加 BE 部件、不做
+        代理兜底），用于与运行时捕获几何合并。"""
+        a = _apply_variants(apply_node)
+        if not a or not a.get("model"):
+            return []
+        name = a["model"]
+        if not name.startswith("minecraft:") and ":" not in name:
+            name = "minecraft:" + name
+        model = self.models.load(name)
+        if model is None or not model.get("elements"):
+            return []
+        xr = int(a.get("x", 0))
+        yr = int(a.get("y", 0))
+        uvlock = bool(a.get("uvlock", False))
+        raw = build_model_quads(model, self._ensure_texture, xr, yr, uvlock)
+        return apply_variant_transform(raw, xr, yr, uvlock)
+
     # JSON 模型之外仍需叠加的原版方块实体几何（如钟的钟体）
     _BE_EXTRA = {
         "minecraft:bell": ("bell", "minecraft:entity/bell/bell_body"),
     }
 
-    def _variant(self, model_name, xr, yr, uvlock, block=None):
-        key = (model_name, xr, yr, uvlock, block)
+    def _variant(self, model_name, xr, yr, uvlock, block=None, parts=()):
+        key = (model_name, xr, yr, uvlock, block, parts)
         if key in self.variants:
             return self.variants[key]
         model = self.models.load(model_name)
@@ -1253,12 +1764,16 @@ class Baker:
         if model is not None:
             raw = build_model_quads(model, self._ensure_texture,
                                     xr, yr, uvlock)
-            if not raw:                      # 方块实体：原版几何 / 代理模型
-                specs = _be_specs(block) if block else None
-                if specs:
-                    raw = self._be_spec_quads(specs[0])
-                if not raw:
-                    raw = self._proxy_quads(block, model)
+        if block in _BE_PARTS and parts:
+            # BE 部件几何（扇叶/传送带等）：替代 BE 代理兜底，随 blockstate
+            # 一起变换（raw 在 transform 之前追加）
+            raw = raw + self._part_quads(parts)
+        if not raw and model is not None:   # 方块实体：原版几何 / 代理模型
+            specs = _be_specs(block) if block else None
+            if specs:
+                raw = self._be_spec_quads(specs[0])
+            if not raw:
+                raw = self._proxy_quads(block, model)
         quads = apply_variant_transform(raw, xr, yr, uvlock)
         extra = self._BE_EXTRA.get(block) if block else None
         if extra and quads:
@@ -1269,6 +1784,55 @@ class Baker:
         self.variant_info.append(self._variant_meta(block, model, raw, quads))
         self.variants[key] = idx
         return idx
+
+    # -------------------------------------------- BE 部件叠加（R12 方向 3）----
+    @staticmethod
+    def _part_specs(block, props):
+        """props -> ((model, pre_rot, copy_rot), ...)（when 顺序匹配、首中即停）。
+
+        props 为 None（块级信息，无变体属性）时跳过带 when 的部件。"""
+        specs = _BE_PARTS.get(block)
+        if not specs:
+            return ()
+        out = []
+        for spec in specs:
+            when = spec.get("when")
+            if when:
+                if props is None:
+                    continue
+                if any(props.get(k) not in (v if isinstance(v, tuple) else (v,))
+                       for k, v in when.items()):
+                    continue
+            out.append((spec["model"], spec.get("pre_rot"),
+                        spec.get("copy_rot")))
+        return tuple(out)
+
+    def _part_quads(self, parts):
+        """部件规格 -> 统一 quad 列表（先 pre_rot 对齐，再按 copy_rot 复制）。"""
+        out = []
+        for model_name, pre_rot, copy_rot in parts:
+            m = self.models.load(model_name)
+            if m is None:
+                continue
+            quads = build_model_quads(m, self._ensure_texture)
+            if pre_rot:
+                quads = self._rot_quads(quads, *pre_rot)
+            if copy_rot:
+                axis, step, origin, count = copy_rot
+                copies = []
+                for i in range(max(1, int(count))):
+                    copies.extend(self._rot_quads(quads, axis, step * i, origin))
+                quads = copies
+            out.extend(quads)
+        return out
+
+    @staticmethod
+    def _rot_quads(quads, axis, deg, origin):
+        if not deg:
+            return quads
+        return [(tuple(_rotate_point(p, origin, axis, deg) for p in verts),
+                 d, texid, tint, cull, uvs)
+                for verts, d, texid, tint, cull, uvs in quads]
 
     def _meta_of(self, block, model, json_quads):
         """(class, tintMask, useModel)；json_quads 非空 = 有 JSON 几何。
@@ -1411,7 +1975,7 @@ class Baker:
         return idx
 
     # -------------------------------------------------- 方块状态 ----
-    def _block_rule(self, apply_node, block=None):
+    def _block_rule(self, apply_node, block=None, props=None):
         a = _apply_variants(apply_node)
         if not a or not a.get("model"):
             return None
@@ -1419,7 +1983,8 @@ class Baker:
         if not model.startswith("minecraft:") and ":" not in model:
             model = "minecraft:" + model
         return self._variant(model, int(a.get("x", 0)), int(a.get("y", 0)),
-                             bool(a.get("uvlock", False)), block)
+                             bool(a.get("uvlock", False)), block,
+                             self._part_specs(block, props))
 
     def bake_blockstate(self, block):
         raw = self.pack.json(blockstate_resource_path(block))
@@ -1441,7 +2006,15 @@ class Baker:
         if "variants" in raw:
             rules = []
             for key, node in raw["variants"].items():
-                vi = self._block_rule(node, block)
+                props = dict(_split_props(key))
+                # R17：该状态有运行时捕获几何 -> 捕获几何 + 静态模型底座合并；
+                # 没有捕获则走静态规则
+                vi = None
+                if self.rt_by_state:
+                    vi = self._rt_variant(block, props,
+                                          self._static_model_quads(node, block))
+                if vi is None:
+                    vi = self._block_rule(node, block, props)
                 if vi is None:
                     continue
                 rules.append((_split_props(key), vi))
@@ -1451,10 +2024,15 @@ class Baker:
         if "multipart" in raw:
             rules = []
             for part in raw["multipart"]:
-                vi = self._block_rule(part.get("apply"), block)
+                # 部件选择用首个 OR 分支的条件（BE 部件按属性选模型的场景
+                # 目前只有 variants 模式的传送带，multipart 这里取近似即可）
+                conds = _norm_cond(part.get("when"))
+                props = ({k: next(iter(v)) for k, v in conds[0]}
+                         if conds and conds[0] else {})
+                vi = self._block_rule(part.get("apply"), block, props)
                 if vi is None:
                     continue
-                for cond in _norm_cond(part.get("when")):
+                for cond in conds:
                     rules.append((cond, vi))
             if not rules:
                 return None
@@ -1560,31 +2138,54 @@ class Baker:
         ov = self.overrides.get(block) or {}
         ov_tids = self._face_tids(ov.get("tex"))
         raw = self.pack.json(blockstate_resource_path(block))
-        model_name = self._first_model(raw)
+        rt_q = (self._rt_quads(self.rt_by_block[block])
+                if block in self.rt_by_block else [])
         model = None
-        if model_name:
-            if not model_name.startswith("minecraft:") and ":" not in model_name:
-                model_name = "minecraft:" + model_name
-            model = self.models.load(model_name)
-        if model is None:
-            # 无 JSON 模型（动态代码模型/内建模型）：仅当标注给出贴图才能成条目
-            if ov_tids is None:
-                return None
-            quads = self._cube_quads(None, ov_tids)
-            json_quads = []
-        else:
-            quads = build_model_quads(model, self._ensure_texture)
+        if rt_q:
+            # R17：该方块有运行时捕获几何 -> 块级信息也用它（分类/默认面/兜底贴图
+            # 都按渲染器真正画出来的几何算）；但机器方块常另有静态底座，一并用上
+            static_q = []
+            model_name = self._first_model(raw)
+            if model_name:
+                if not model_name.startswith("minecraft:") and ":" not in model_name:
+                    model_name = "minecraft:" + model_name
+                mdl = self.models.load(model_name)
+                if mdl is not None and mdl.get("elements"):
+                    static_q = build_model_quads(mdl, self._ensure_texture)
+            model = {"elements": []}
+            quads = static_q + rt_q
             json_quads = quads
-            if not quads:                # 方块实体（无 JSON 几何）
-                specs = _be_specs(block)
-                if specs:
-                    quads = self._be_spec_quads(specs[0])   # 原版方块实体：保真几何
-                if not quads:            # 未收录 -> 简化代理模型
-                    quads = self._proxy_quads(block, model)
-                    if quads:
-                        _STATS["approx_blocks"].append(block)
-                if not quads:
+        else:
+            model_name = self._first_model(raw)
+            if model_name:
+                if not model_name.startswith("minecraft:") and ":" not in model_name:
+                    model_name = "minecraft:" + model_name
+                model = self.models.load(model_name)
+            if model is None:
+                # 无 JSON 模型（动态代码模型/内建模型）：仅当标注给出贴图才能成条目
+                if ov_tids is None:
                     return None
+                quads = self._cube_quads(None, ov_tids)
+                json_quads = []
+            else:
+                quads = build_model_quads(model, self._ensure_texture)
+                if block in _BE_PARTS:
+                    # 块级信息同样吃部件几何（无条件规格）：分类与默认面按
+                    # 完整几何判断， Greedy 兜底时贴图也从真实部件里挑
+                    pq = self._part_quads(self._part_specs(block, None))
+                    if pq:
+                        quads = quads + pq
+                json_quads = quads
+                if not quads:            # 方块实体（无 JSON 几何）
+                    specs = _be_specs(block)
+                    if specs:
+                        quads = self._be_spec_quads(specs[0])  # 原版方块实体：保真几何
+                    if not quads:        # 未收录 -> 简化代理模型
+                        quads = self._proxy_quads(block, model)
+                        if quads:
+                            _STATS["approx_blocks"].append(block)
+                    if not quads:
+                        return None
         cls, mask, use_model = self._meta_of(block, model, json_quads)
         if ov:                           # 手工标注覆盖启发式结果
             if ov.get("class") is not None:
@@ -1900,6 +2501,9 @@ def main(argv=None):
     ap.add_argument("--only", default="", help="逗号分隔的方块名（不含命名空间）")
     ap.add_argument("--classes", default=None,
                     help="手工分类标注表 JSON（默认: 脚本目录下 mcbridge-classes.json）")
+    ap.add_argument("--runtime-models", default=None,
+                    help="运行时捕获几何 JSON（tools/capture_export.py 产出）；"
+                         "默认自动加载仓库根 dist/runtime_models.json")
     args = ap.parse_args(argv)
     if Image is None:
         print("需要 Pillow：pip install pillow", file=sys.stderr)
@@ -1913,9 +2517,18 @@ def main(argv=None):
     overrides = load_overrides(cls_path)
     if overrides:
         print("分类标注: %s（%d 条）" % (cls_path, len(overrides)), flush=True)
+    rt_path = args.runtime_models
+    if rt_path is None:                     # 约定位置存在才自动加载
+        cand = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "dist", "runtime_models.json")
+        rt_path = cand if os.path.exists(cand) else None
+    runtime = load_runtime_models(rt_path)
+    if runtime[0]:
+        print("运行时捕获几何: %s（%d 状态 / %d 方块）"
+              % (rt_path, len(runtime[0]), len(runtime[1])), flush=True)
     inputs = _expand_inputs(args.inputs)
     pack = ResourcePack(inputs)
-    baker = Baker(pack, args.mc_version, only or None, overrides)
+    baker = Baker(pack, args.mc_version, only or None, overrides, runtime)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     nb, nv, nt = baker.run(args.out)
     size = os.path.getsize(args.out)

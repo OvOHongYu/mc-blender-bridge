@@ -351,23 +351,36 @@ class TestScheduler(unittest.TestCase):
         sch.stop()
 
     def test_save_stamp_reload(self):
-        """R10 存档：变更戳变化 -> 清缓存 + LIVE 重扫（首查只建基线）。"""
-        stamps = {"v": 1.0}
-        invalidated = {"n": 0}
+        """R10 存档：变更集变化 -> 清缓存 + 受影响 region 的 LIVE 重扫
+        （首查只建基线；未受影响的组与其它维度写盘均不触发重载）。"""
+        stamps = {"overworld": frozenset({("region", 0, 0, 1000, 10)}),
+                  "the_nether": frozenset()}
+        invalidated = {"dims": []}
         sch = self.Scheduler(self._RevClient(), self.Params(
-            world_stamp_fn=lambda: stamps["v"],
-            invalidate_fn=lambda: invalidated.__setitem__(
-                "n", invalidated["n"] + 1)))
-        self._live(sch, (0,))
+            world_stamp_fn=lambda dim: stamps[dim],
+            invalidate_fn=lambda dim=None: invalidated["dims"].append(dim)))
+        self._live(sch, (0,))                     # 组 (0,0) 覆盖区块 0..1
+        self._live(sch, (32,))                    # 组 (32,0) 在 region 1（区块 32..）
         self.assertTrue(sch.maybe_poll_versions())
         self._wait_poll(sch)
-        self.assertEqual(invalidated["n"], 0)
+        self.assertEqual(invalidated["dims"], [])
         self.assertEqual(sch.state[("overworld", 0, 0)]["status"], "LIVE")
-        stamps["v"] = 2.0                         # 存档被外部更新
+        # 同一 region 指纹变化 -> 只有覆盖 region(0,0) 区块的组重载
+        stamps["overworld"] = frozenset({("region", 0, 0, 2000, 10)})
         self.assertTrue(sch.maybe_poll_versions(force=True))
         self._wait_poll(sch)
-        self.assertEqual(invalidated["n"], 1, "变更后应先失效缓存")
+        self.assertEqual(invalidated["dims"], ["overworld"])
         self.assertEqual(sch.state[("overworld", 0, 0)]["status"], "QUEUED")
+        self.assertEqual(sch.state[("overworld", 32, 0)]["status"], "LIVE",
+                         "其它 region 的组不受影响")
+        # 其它维度写盘 -> 主世界变更集未变，不 invalidate 也不重扫
+        invalidated["dims"].clear()
+        stamps["the_nether"] = frozenset({("region", 5, 5, 3000, 3)})
+        self.assertTrue(sch.maybe_poll_versions(force=True))
+        self._wait_poll(sch)
+        self.assertEqual(invalidated["dims"], [])
+        self.assertEqual(sch.state[("overworld", 0, 0)]["status"], "QUEUED",
+                         "主世界未变化，不重扫")
         sch.stop()
 
 
