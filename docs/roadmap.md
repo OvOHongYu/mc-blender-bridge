@@ -95,7 +95,7 @@
 > → 整块贴图退回程序化色块、非完整方块退回整立方近似（实测相机周围 99 个状态中
 > 86 个无贴图、92 个不注入模型）。新增 `_block_lookup()`：全名未命中时回退基础名。
 >
-> ⑭ **`uvlock` 的旋转方向错了、且漏改面的 rotation 索引**——正确式为
+> ⑭ **`uvlock`** **的旋转方向错了、且漏改面的 rotation 索引**——正确式为
 > `M = T(0.5)·D(d)·R⁻¹·D(d')ᵀ·T(-0.5)`（原先少了 `R` 求逆与绕方块中心的平移）；
 > 并且原版 `BakedQuadFactory.uvLock` 还会**一并改写面的 rotation 索引**，该索引决定
 > 「角点 i ↔ 矩形角 (i+rot/90)%4」的对应，漏掉它则 90°/270° 下 u/v 轴该互换而未互换。
@@ -177,7 +177,7 @@
 > 组键对齐、顶点覆盖整组范围）、`test_codec_mesher.py::TestChunkGroup`
 > （32×32 平板合并成 6 面、组外圈剔除组边界侧面、`merge_geos` 平移与材质去重）。
 
-## R5 实体与方块实体 [P2·难] ✅ 已完成（v1.4.0 画定位定案）
+## R5 实体与方块实体 \[P2·难] ✅ 已完成（v1.4.0 画定位定案）
 
 > 方块实体原版模型已完成（v1.3）：箱子/床/告示牌/旗帜/潜影盒/头颅/装饰陶罐/
 > 传送门框架/钟等直接使用从客户端 jar 提取的原版几何 + 原版贴图。
@@ -224,7 +224,7 @@
 > **控制模式实体（v1.3）**：模组新增 `GET /api/entities?dim&cx&cz`（只提取
 > 画 / 盔甲架两种，字段见 `docs/协议规范.md`），`/api/ping` 声明 `entities: true`
 > 做能力协商（旧版模组未声明时插件不请求，避免每次网格化 404）；
-> `net.py::ApiClient.entities` 与 server_sim 已接，调度器据此在 LOD0 把实体
+> `net.py::ApiClient.entities` 与 server\_sim 已接，调度器据此在 LOD0 把实体
 > 并入组对象。**待真实游戏环境验证**（本环境无法编译/运行 MC 模组，
 > 需用户构建模组并加载资产包后确认控制模式出画/盔甲架）。
 >
@@ -232,7 +232,7 @@
 > 由 v3 状态粒度 + 按状态注入烘焙模型覆盖，故"作物生长状态驱动的贴图变体"
 > 一项据此结项。
 
-## R6 渲染增强 [P2·易] ✅ 已完成（v1.4.0）
+## R6 渲染增强 \[P2·易] ✅ 已完成（v1.4.0）
 
 - 发光方块（萤石/岩浆）输出自发光节点（Emission × 原版 light 值）。
   ✅ 已完成：材质节点追加 **Emission + Add Shader**——
@@ -255,11 +255,11 @@
   蜡烛蛋糕同公式）。
   剩余：无（存档模式模组方块可再由关键词策略覆盖）。
 
-## R7 稳定性与生态 [P1·易] ✅ 已完成
+## R7 稳定性与生态 \[P1·易] ✅ 已完成
 
 - `load_post` 残留对象处理（提示转静态或清除，当前仅有手动卸载）。
   ✅ 已完成：注册 `load_post` 处理器——按**文件路径变化**区分真实切档与
-  memfile 撤销（undo/redo 也触发 load_post，同路径只重建材质缓存不重置连接）；
+  memfile 撤销（undo/redo 也触发 load\_post，同路径只重建材质缓存不重置连接）；
   切档时作废旧连接、检测场景中的 `MCB_` 残留对象并在面板提示
   **转为静态保留 / 全部清除**（`mcb.leftover_keep` / `mcb.leftover_clear`）；
 - 进度条 UI（预热/首载时显示区块 x/y）。
@@ -269,7 +269,7 @@
 - CI：GitHub Actions 跑 pytest + Java 对拍 + 打包发布（zip/jar artifact）。
   ✅ 已完成（v1.3.1）：`ci.yml`（push/PR → pytest 全量 + 夹具再生对拍 +
   `gradle build` 含跨语言一致性对拍 + `pack_release.py` 打包 artifact）、
-  `release.yml`（打 `v*` tag 自动发版，内置 GITHUB_TOKEN 免 PAT）。
+  `release.yml`（打 `v*` tag 自动发版，内置 GITHUB\_TOKEN 免 PAT）。
 
 ## R8 群系染色（biome tint）\[P1·难]
 
@@ -295,17 +295,17 @@
 **验证**
 
 - Python 复刻 vs 原版 Java **逐点对拍 0/64 不一致**（`tools/biome_colors/ProbeColormap.java`）；
-- plains/forest/swamp/desert/snowy_plains/jungle/taiga/dark_forest **八色命中 wiki 真值**；
+- plains/forest/swamp/desert/snowy\_plains/jungle/taiga/dark\_forest **八色命中 wiki 真值**；
 - 真实存档端到端：swamp `#6A7039`、desert `#BFB755`、plains `#91BD59` 三色精确命中，
   且与 `blocks.py` 原有的"平原常量"完全自洽（平原区颜色不变）；
 - 几何代价：真实 fillbiome 布局 +0.05%；密集群系最坏 +20.8%，
-  "只让染色方块进键"可压到 **+1.3~1.6%**；
+  "只让染色方块进键"可压到 **+1.3\~1.6%**；
 - 回归测试 `tests/test_biome_tint.py`（20 例）。
 
 **剩余（控制模式）**：✅ 已随 v1.3.1 完成——MCM1 v2 携带逐面群系 id、
 MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用同一套客户端染色。
 
-## R9 按摄像机距离优先加载 \[P1·易\] ✅ 已完成
+## R9 按摄像机距离优先加载 \[P1·易] ✅ 已完成
 
 **可行性结论：✅ 技术可行，且可以做到吞吐零损耗**（排序对象是小队列，
 不涉及额外 HTTP 或串行化）。
@@ -339,17 +339,17 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 **验收**：快速平移/跳跃镜头时近处区块先于远处出现；吞吐（组/秒）与
 关闭时无差异；单测模拟乱序完成（远组先 ready）断言应用序列按距离。
 
-## R10 区块更新策略（开关 / 事件驱动 / 手动 / 白黑名单）\[P1·中\] ✅ 已完成
+## R10 区块更新策略（开关 / 事件驱动 / 手动 / 白黑名单）\[P1·中] ✅ 已完成
 
 **可行性结论：✅ 全部可行**——总开关、手动更新、白黑名单为纯插件侧；
 事件驱动需要模组小改（全局修订号），并提供回退。
 
 > 实现记录：① 「自动更新」总开关（两模式）；② **事件驱动**：模组在
 > `VersionTracker.bump`（WorldChunkMixin setBlockState 钩子）同步递增
-> **全局世界修订号**，新增 `GET /api/worldrev`——插件以 **event_interval**
+> **全局世界修订号**，新增 `GET /api/worldrev`——插件以 **event\_interval**
 > （默认 0.5s；仅取一个整数，开销≈0）轮询，变更才做逐组版本扫描，
 > 方块改动亚秒级生效；旧模组 404/缺方法自动永久回退常规轮询
-> （version_interval，默认 5s）；
+> （version\_interval，默认 5s）；
 > ③ 存档模式自动更新：`SaveClient.world_stamp()` 变化 → 先 `invalidate()`
 > （清 payload/实体/网格缓存并重开 region 句柄，防偏移表过期）→ 重扫受管
 > LIVE 组；④ 白/黑名单（组级，`mcb.list_manage` 操作符 + 面板「区块管理」
@@ -386,7 +386,7 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 3. **手动更新（两模式）**：修正存档模式刷新——先失效 payload/网格缓存
    再重排队；控制模式维持版本号失效路径；刷新操作符支持"仅刷新选中对象"；
 4. **白名单 / 黑名单**（组级，与 R11 共用选择交互）：
-   - 添加方式：视口选中 MCB_ 对象 → 操作符入列（组键 dim,gx,gz），
+   - 添加方式：视口选中 MCB\_ 对象 → 操作符入列（组键 dim,gx,gz），
      面板列表可查看/移除（CollectionProperty，随 .blend 保存）；
    - **白名单** = 强制更新：总开关关闭也更新（可配独立更高轮询频率）——
      适用"边拍边改"的舞台区；
@@ -398,7 +398,7 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 游戏内改方块数秒内更新、无改动时无逐组轮询请求（日志可证）；
 黑名单组改动不触发重载；存档模式手动刷新可见改动。
 
-## R11 常见区块（钉选，不被主动卸载）\[P2·易\] ✅ 已完成
+## R11 常见区块（钉选，不被主动卸载）\[P2·易] ✅ 已完成
 
 **可行性结论：✅ 纯插件侧，低难度**（调度器已有 frozen 全局冻结原语，
 本项是其组级、持久化版本）。
@@ -406,7 +406,7 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 > 实现记录：① 调度器 `pinned` 组键集合——卸载判定跳过；②
 > `ensure_pinned()` 幂等补载（无距离限制）供「自动预载」（连接后、
 > 「卸载全部」后每 tick 调用）；③ 名单序列化存场景属性
-> （`dim:gx,gz;...`，随 .blend 保存），step_tick 按 (调度器id, 字符串)
+> （`dim:gx,gz;...`，随 .blend 保存），step\_tick 按 (调度器id, 字符串)
 > 缓存同步；④ `mcb.list_manage` 操作符（名单+操作双枚举，R10 白黑名单
 > 复用）+ 面板「区块管理」框；⑤ 「卸载全部」同时清调度器状态（在途
 > 抓取安全丢弃），范围内组重入队、钉选组自动拉回；⑥ 超 64 组告警。
@@ -417,7 +417,7 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 
 **方案**：
 
-1. **设为常见区块**：视口选中 MCB_ 对象（或输入坐标）→ 操作符钉选，
+1. **设为常见区块**：视口选中 MCB\_ 对象（或输入坐标）→ 操作符钉选，
    面板列表管理（与 R10 白黑名单共用交互组件）；
 2. **调度器**：卸载判定跳过钉选组（`if key in pinned: continue`）——
    移出 `r_unload` 后对象仍在场景、仍可被相机回看；
@@ -440,47 +440,47 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 
 > **实现记录（`tools/bake_assets.py`，两侧加载器共用）**：
 >
-> ① **`neoforge:composite` 展开**（`ModelLoader._composite_elements`）：children
+> ① **`neoforge:composite`** **展开**（`ModelLoader._composite_elements`）：children
 > 各是完整子模型，展开成一份 elements 列表。关键点是**把每个 child 的面贴图引用
 > 就地解析成具体贴图名再合并**——各 child 普遍都用 `#0`/`#1`，不固化就会在合并后
 > 的公用纹理槽里互相覆盖。
 >
-> ② **`neoforge:obj` 解析**（`ModelLoader._parse_obj` / `_parse_mtl`）：
+> ② **`neoforge:obj`** **解析**（`ModelLoader._parse_obj` / `_parse_mtl`）：
 > 解析 `.obj`（`v`/`vt`/`vn`/`f`/`usemtl`/`mtllib`）与配套 `.mtl`。Create 的
 > MTL 写的正是 `map_Kd #3` 这类**纹理变量引用**（与 MC 模型同源），故贴图解析
 > 直接复用 `resolve_texture`；OBJ 常被多个 blockstate 复用换色（16 色阀门把手
 > 共用一份 `.obj`，靠 `#3` 取色），所以**贴图解析必须发生在合并后的纹理槽上**。
 > UV 语义对齐 NeoForge `ObjModel`：`v_mc = flip_v ? 1 - v_obj : v_obj`，再按
-> Blender 约定翻转；顶点 ×16 转 1/16 单位（OBJ 用 0~1 方块单位）；面方向取 vn
+> Blender 约定翻转；顶点 ×16 转 1/16 单位（OBJ 用 0\~1 方块单位）；面方向取 vn
 > 的**主导轴**。
 >
-> ③ **`#` 前缀容错**：`resolve_texture` 现兼容无 `#` 的变量引用
+> ③ **`#`** **前缀容错**：`resolve_texture` 现兼容无 `#` 的变量引用
 > （1.21 原版 `heavy_core` 写 `"all"`），修掉一个原版方块的几何丢失。
 >
 > ④ 只接受三角/四边形面（Blender 导出即四边形）；多边形计入 `_STATS["obj_poly"]`。
 >
 > **产物对比（NeoForge 实例：原版 + Create 6.0.10 + ultramarine）**：
 >
-> | 指标 | 实施前 | 实施后 |
-> | -- | -- | -- |
-> | 近似几何（兜底）方块 | 56 | **14** |
-> | create 兜底方块 | 45 | **4**（2 流体 + 2 Flywheel） |
-> | 方块数 / 变体数 | 2254 / 21354 | 2254 / 21354（不变） |
-> | 贴图数 | 3327 | 3331 |
+> | 指标          | 实施前          | 实施后                      |
+> | ----------- | ------------ | ------------------------ |
+> | 近似几何（兜底）方块  | 56           | **14**                   |
+> | create 兜底方块 | 45           | **4**（2 流体 + 2 Flywheel） |
+> | 方块数 / 变体数   | 2254 / 21354 | 2254 / 21354（不变）         |
+> | 贴图数         | 3327         | 3331                     |
 >
 > 41 个 create 方块全部出真实几何（`crushing_wheel` 268 面/变体、
 > `large_water_wheel` 1738、`track` 51、阀门把手 60、数码管 22、`display_link` 33、
 > `stock_link` 34…），顶点单位与 elements 分支**完全同口径**（1/16 网格，
 > 支持亚像素与越界，如粉碎轮 y 到 22.8）。剩余 14 个兜底项全部无害：
-> 原版 9 个（water/lava/barrier/light/end_portal 等本无方块几何）+
-> create 4 个（chocolate/honey 是流体；belt/factory_gauge 见方向 1 结论）+
+> 原版 9 个（water/lava/barrier/light/end\_portal 等本无方块几何）+
+> create 4 个（chocolate/honey 是流体；belt/factory\_gauge 见方向 1 结论）+
 > ultramarine 1 个。
 >
 > **未做**：其余 NeoForge 内置 loader（`separate_transforms` 服务物品视角、
 > `empty` 无几何、`elements` 语义近似标准）无方块收益，故不实现；Fabric 侧无
 > 内置 loader（见下），本轮不含。
 
-**方向 3 落地（后续补全，`_BE_PARTS` 表）**：实机复验发现"部件缺失"的真正
+**方向 3 落地（后续补全，`_BE_PARTS`** **表）**：实机复验发现"部件缺失"的真正
 大头不是 blockstate 方块，而是 **BE/Flywheel 渲染器动态绘制的部件**（风扇叶、
 钻头、搅拌头、压板、表盘、大炮炮管、整条传送带）。排查（`dist/_r12_be_models.py`：
 扫"不被任何 blockstate 引用的模型"）发现这些部件在 jar 里都带了**静态 JSON
@@ -502,19 +502,19 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 - 姿态强依赖运行时的不做：机械臂关节（部件坐标按 BE pivot 摆放，模型 JSON
   无法恢复）、部署器手、绳索/软管长度、运动中的活塞/大炮等装置。
 
-| 指标 | 方向 2 后 | 方向 3 后 |
-| -- | -- | -- |
-| belt 变体几何 | 6 面（整立方代理） | 7~56 面（分段真实形状） |
-| encased_fan | 14 面（仅外壳） | 42 面（+4 叶片） |
-| mechanical_drill | 22 面 | 80 面（+钻头） |
-| mechanical_mixer | 20 面 | 27 面（+搅拌头） |
-| mechanical_press | — | 48 面（+压板/活塞杆） |
-| speedometer/stressometer | 12 面 | 25 面（+表盘） |
-| schematicannon | 18 面 | 58 面（+炮管/支架） |
+| 指标                       | 方向 2 后     | 方向 3 后          |
+| ------------------------ | ---------- | --------------- |
+| belt 变体几何                | 6 面（整立方代理） | 7\~56 面（分段真实形状） |
+| encased\_fan             | 14 面（仅外壳）  | 42 面（+4 叶片）     |
+| mechanical\_drill        | 22 面       | 80 面（+钻头）       |
+| mechanical\_mixer        | 20 面       | 27 面（+搅拌头）      |
+| mechanical\_press        | —          | 48 面（+压板/活塞杆）   |
+| speedometer/stressometer | 12 面       | 25 面（+表盘）       |
+| schematicannon           | 18 面       | 58 面（+炮管/支架）    |
 
 变体数 21354 -> 21394（+40，belt 分段组合），包体 43.0 -> 43.2 MB。
 
-**第三轮补全（实机复验，`shaft_half` 与锁链传动轮）**：用户反馈"大部分方块仍缺部件"
+**第三轮补全（实机复验，`shaft_half`** **与锁链传动轮）**：用户反馈"大部分方块仍缺部件"
 后重新普查（`dist/_r14_parts_scan.py`：列出「有模型但 blockstate 从不引用」的孤儿部件，
 54 个方块命中），并用**字节码取证**确定归属（`dist/_r14_java*.py`：从 Create jar 的
 `.class` 常量池读出渲染器类引用的部件字段名）：
@@ -548,40 +548,38 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
   外壳（5 元素、无 4×4 轴截面），补 ±Y 半轴。
   注：`create:cogwheel` / `large_cogwheel` 的静态模型**自带** `[6,0,6]→[10,16,10]`
   整轴（7 / 16 元素），无需补——它们的 `COGWHEEL_SHAFT` 只在"带支架"变体用。
-
 - 验证：软件渲染预览改为**按不透明像素取代表色 + alpha 合成**（旧版用整图平均色，
   会把半透明贴图渲染成黑块、掩盖真实情况），逐块目检与游戏截图对齐；
 - **遗留**：姿态强依赖运行时的部件仍不做——机械臂关节（坐标按 BE pivot 摆放）、
   部署器手、绳索/软管长度、门扇、飞轮/水车（OBJ 已覆盖）、`conveyor_casing.obj`
   （字节码里无对应字段，疑为废弃资源）。
 
-| 指标 | 第三轮前 | 第三轮后 |
-| -- | -- | -- |
-| chain_conveyor | 34 面（仅外壳） | 141 面（+轮/轴/护罩） |
-| gearshift / clutch | 16 面 | 28 面（+上下半轴） |
-| gearbox | 18 面 | 22 面（+水平半轴） |
-| andesite_encased_cogwheel | 20 面 | 64 面（+上下半轴） |
-
+| 指标                          | 第三轮前      | 第三轮后           |
+| --------------------------- | --------- | -------------- |
+| chain\_conveyor             | 34 面（仅外壳） | 141 面（+轮/轴/护罩） |
+| gearshift / clutch          | 16 面      | 28 面（+上下半轴）    |
+| gearbox                     | 18 面      | 22 面（+水平半轴）    |
+| andesite\_encased\_cogwheel | 20 面      | 64 面（+上下半轴）    |
 
 **动机**：NeoForge 实机验收（Create 6.0.10）暴露——烘焙 2254 个方块后仍有
 **56 个方块走"近似几何"兜底**。逐块归类（探针 `dist/_r12_probe.py`，复用烘焙
 自身判定逻辑）后，根因**不是"没有模型"，而是三类非常规模型**：
 
-| 类别 | 数量 | 其中 create | 说明 |
-| -- | -- | -- | -- |
-| **A. OBJ 模型** | 23 | 23 | `loader: neoforge:obj`，几何在 `.obj` + `.mtl` 里 |
-| **C. composite 复合** | 18 | 18 | `loader: neoforge:composite`，`children` 是标准 JSON elements |
-| **B. 空几何** | 14 | 4 | 无 `elements`；原版 9 个（water/lava/barrier/light/…）本无几何，create 4 个中 2 个是流体（chocolate/honey，无害）、2 个是 Flywheel 视觉 |
-| **D. 其它** | 1 | 0 | `minecraft:heavy_core`——烘焙未识别 `"all"`（缺 `#` 前缀）的变量引用 |
+| 类别                  | 数量 | 其中 create | 说明                                                                                                          |
+| ------------------- | -- | --------- | ----------------------------------------------------------------------------------------------------------- |
+| **A. OBJ 模型**       | 23 | 23        | `loader: neoforge:obj`，几何在 `.obj` + `.mtl` 里                                                                |
+| **C. composite 复合** | 18 | 18        | `loader: neoforge:composite`，`children` 是标准 JSON elements                                                   |
+| **B. 空几何**          | 14 | 4         | 无 `elements`；原版 9 个（water/lava/barrier/light/…）本无几何，create 4 个中 2 个是流体（chocolate/honey，无害）、2 个是 Flywheel 视觉 |
+| **D. 其它**           | 1  | 0         | `minecraft:heavy_core`——烘焙未识别 `"all"`（缺 `#` 前缀）的变量引用                                                        |
 
 **关键实证**（决定三条方向的取舍）：
 
-- OBJ 是 **Blender 导出的标准 OBJ + 配套 `.mtl`**，顶点坐标**已是 0~1 方块单位**
-  （`v 0.3125` = 5/16 像素），面数小（31 ~ 3236，最大 `waterwheel_large` 181 KB）；
+- OBJ 是 **Blender 导出的标准 OBJ + 配套** **`.mtl`**，顶点坐标**已是 0\~1 方块单位**
+  （`v 0.3125` = 5/16 像素），面数小（31 \~ 3236，最大 `waterwheel_large` 181 KB）；
 - composite 的 `children.*.elements` 是**完全标准的 JSON 模型元素**
-  （`from/to/faces/uv/rotation`），可**直接复用现有 `build_model_quads`**；
+  （`from/to/faces/uv/rotation`），可**直接复用现有** **`build_model_quads`**；
 - `BeltVisual extends KineticBlockEntityVisual`，几何由 Flywheel
-  `ScrollInstance[] belts` / `RotatingInstance pulley` 描述——**不是 `ModelPart`**，
+  `ScrollInstance[] belts` / `RotatingInstance pulley` 描述——**不是** **`ModelPart`**，
   且皮带形状按路径/滚动**运行时生成**（`GaugeVisual` 同理）。
 
 **方向评估结论**：
@@ -590,7 +588,7 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
    明确的两件事：① `neoforge:obj` 解析；② `neoforge:composite` 展开）。
    覆盖 **41/45** 个 create 兜底方块（91%；A+C 两类全部拿下），
    **纯静态、零游戏依赖、可自动化差分回归**。
-   成本：composite 展开 ≈30 行（几乎白送），OBJ 解析 ≈150~200 行
+   成本：composite 展开 ≈30 行（几乎白送），OBJ 解析 ≈150\~200 行
    （`v/vt/f` + `mtllib/usemtl` → 贴图映射 + `flip_v` + 多边形转四边形）。
 2. **方向 1「运行期导出」——不建议投入**。Flywheel 视觉不基于 `ModelPart`，
    导出需深度集成 Flywheel 1.0.6 内部 API（随 Create/Flywheel 升级即失效），
@@ -626,11 +624,11 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 
 **顺带发现（建议随方向 2 一并修）**：
 
-- 烘焙解析面贴图引用时**只认 `#var`**，遇到 `"all"`（1.21 原版 `heavy_core` 的
+- 烘焙解析面贴图引用时**只认** **`#var`**，遇到 `"all"`（1.21 原版 `heavy_core` 的
   写法，缺 `#`）即丢弃该面 → 退化为兜底；原版解析器对此容错，烘焙需跟上；
 - `create:chocolate` / `create:honey` 确认是**流体**（`textures/fluid/*_still.png`
-  + `data/c/tags/fluid/*.json`），在 B 类清单中属无害噪音；但**存档模式**的
-  Python 侧分类是否同样判为流体，需单独核对。
+  - `data/c/tags/fluid/*.json`），在 B 类清单中属无害噪音；但**存档模式**的
+    Python 侧分类是否同样判为流体，需单独核对。
 
 **验收**：方向 2 落地后，A/C 两类（41 个 create 方块）输出真实几何；
 剩余兜底项在烘焙输出中仍明确列出，且仅剩 2 个 Flywheel 视觉方块
@@ -639,16 +637,16 @@ MCC1 v2 携带 section 群系（4×4×4 名表 + 下标），两条路径共用�
 **限制**：Flywheel 系的实例化方块几何本质上是运行时的，静态烘焙无法覆盖；
 每引入一个新模组都可能新增非常规 loader，属"长期演进"而非一次性任务。
 
-## N1 NeoForge 适配（21.1.x）\[P1·易\] ✅ 已完成
+## N1 NeoForge 适配（21.1.x）\[P1·易] ✅ 已完成
 
 **动机**：控制模式的 MC 端从 Fabric 迁移到 NeoForge（PCL 实例
-1.21.1-NeoForge_21.1.256，带 Create 6.0.10 作为模组方块压力样本）。
+1.21.1-NeoForge\_21.1.256，带 Create 6.0.10 作为模组方块压力样本）。
 
 **架构**：新工程 `mcmod-neoforge/` 与 `mcmod/` 并存，不动 Fabric 工程。
 纯 Java 部分（codec/、mesh 主体、http/Query、core/VersionTracker、tex/）
 经 `srcDirs + exclude` **直接引用** Fabric 工程源码（零拷贝、零漂移）；
 只有 5 个加载器耦合文件用 **Mojang 官方映射（mojmap）** 重写：
-`McBridge`（@Mod + NeoForge.EVENT_BUS 的 ServerStarted/Stopping）、
+`McBridge`（@Mod + NeoForge.EVENT\_BUS 的 ServerStarted/Stopping）、
 `WorldChunkMixin`（LevelChunk，NeoForge 21.1 运行时即 mojmap 名，无需 refmap）、
 `ChunkSnapshotService`、`ApiServer`、`BlockClassifier`。
 
@@ -667,7 +665,7 @@ neoforge 主 jar，NFRT/NeoForm 不可得），新增
 `tools/build_neoforge_local.py`——用实例自带的 AutoRenamingTool 把 vanilla
 slim.jar 按 Mojang 官方映射（--reverse）重命名作编译类路径，javac 直编
 （-proc:none 规避 mixin AP），产物与 MDG 等价（`build_neoforge_local.py`
-输出同路径 `build/libs/mcbridge-neoforge-<ver>.jar`，pack_release 可直接取）。
+输出同路径 `build/libs/mcbridge-neoforge-<ver>.jar`，pack\_release 可直接取）。
 实证：用户实例日志显示 Flywheel 的 LevelChunkMixin 以 mojmap 名混入，
 运行时映射体系确认无误。
 
@@ -675,7 +673,7 @@ slim.jar 按 Mojang 官方映射（--reverse）重命名作编译类路径，jav
 `curl /api/ping /api/blocks /api/chunk /api/worldrev` 正常；
 游戏内放置/拆除方块 worldrev 递增（mixin 生效）。
 
-## R17 运行时几何导出（多模组兼容的系统解）\[P1·难\] ✅ 已完成（全链路落地；R17b Flywheel 视觉层）
+## R17 运行时几何导出（多模组兼容的系统解）\[P1·难] ✅ 已完成（全链路落地；R17b Flywheel 视觉层）
 
 **动机**：R12 方向 2/3 靠"读字节码找部件 + 手写朝向"逐块补，用户连续三轮反馈
 "补了又缺"。根因是结构性的：Create 这类科技模组的机器几何**由渲染器在运行时
@@ -697,32 +695,32 @@ slim.jar 按 Mojang 官方映射（--reverse）重命名作编译类路径，jav
 
 **已实现（全链路落地）**：
 
-| 文件 | 职责 |
-| -- | -- |
-| `capture/GeometryCapture.java` | 状态 / 统计 / 报表；按方块归属的 sink；**刻意不引用客户端类**，服务端侧可安全加载 |
-| `capture/QuadRecorder.java` | 客户端 tee 型 `VertexConsumer`（累积顶点 → 四边形）+ 建图集 sprite 表 |
-| `mixin/MultiBufferSourceMixin.java` | 客户端 mixin，挂在 `getBuffer` 的 RETURN |
-| `capture/FlywheelCapture.java` | **R17b**：Flywheel 视觉层取顶点（`Model#meshes` → `Mesh#write`）+ 反射读实例变换 + 读渲染原点 |
-| `mixin/BlockEntityStorageMixin.java` | **R17b**：视觉构造时置「当前方块」上下文 |
-| `mixin/InstancerProviderImplMixin.java` | **R17b**：记录 `(方块, Model, InstanceType)`，跳过 SHADOW |
-| `mixin/MinecraftTickMixin.java` | **R17b**：帧末在捕获窗口内做一次快照 |
-| `http/ApiServer.java` | 新增 `/api/capture`、`/api/capture/result`、`/api/capture/sprites`、`/api/block` |
-| `mcbridge.mixins.json` | 记录层 mixin 放入 `client` 数组（专用服务端不加载） |
-| `tools/capture_export.py` | 批量导出：归属 → 纹理还原 → 按状态聚合 → `dist/runtime_models.json` |
-| `bake_assets.py --runtime-models` | 按 `(方块, 属性集)` 把捕获几何挂到对应状态，与静态底座**合并** |
+| 文件                                      | 职责                                                                          |
+| --------------------------------------- | --------------------------------------------------------------------------- |
+| `capture/GeometryCapture.java`          | 状态 / 统计 / 报表；按方块归属的 sink；**刻意不引用客户端类**，服务端侧可安全加载                            |
+| `capture/QuadRecorder.java`             | 客户端 tee 型 `VertexConsumer`（累积顶点 → 四边形）+ 建图集 sprite 表                        |
+| `mixin/MultiBufferSourceMixin.java`     | 客户端 mixin，挂在 `getBuffer` 的 RETURN                                           |
+| `capture/FlywheelCapture.java`          | **R17b**：Flywheel 视觉层取顶点（`Model#meshes` → `Mesh#write`）+ 反射读实例变换 + 读渲染原点    |
+| `mixin/BlockEntityStorageMixin.java`    | **R17b**：视觉构造时置「当前方块」上下文                                                    |
+| `mixin/InstancerProviderImplMixin.java` | **R17b**：记录 `(方块, Model, InstanceType)`，跳过 SHADOW                           |
+| `mixin/MinecraftTickMixin.java`         | **R17b**：帧末在捕获窗口内做一次快照                                                      |
+| `http/ApiServer.java`                   | 新增 `/api/capture`、`/api/capture/result`、`/api/capture/sprites`、`/api/block` |
+| `mcbridge.mixins.json`                  | 记录层 mixin 放入 `client` 数组（专用服务端不加载）                                          |
+| `tools/capture_export.py`               | 批量导出：归属 → 纹理还原 → 按状态聚合 → `dist/runtime_models.json`                         |
+| `bake_assets.py --runtime-models`       | 按 `(方块, 属性集)` 把捕获几何挂到对应状态，与静态底座**合并**                                       |
 
 构建侧：`tools/build_neoforge_local.py` 补了 brigadier 到编译类路径，并让 javac
 用英文报错；`Dist` 在运行时不在任何库 jar 里（只在构建工具 jar），故**放弃
-`@EventBusSubscriber` 的 side 过滤**，改用 HTTP 触发——顺带省掉客户端命令 API 依赖。
+`@EventBusSubscriber`** **的 side 过滤**，改用 HTTP 触发——顺带省掉客户端命令 API 依赖。
 
 **✅ 原型验证已通过（实机 Create 6.0.10 基地）**：
 
-| 结论 | 证据 |
-| -- | -- |
-| 拦截点有效 | 报告里出现 `entity_cutout` / `entity_solid` / `entity_translucent_cull` / `solid` 四层，全部经过 `BufferSource` |
-| 机器几何抓得到 | 在坐标 (125.5, −59.5, −387.5)（该区块含 12 种 create 方块：belt / chain_conveyor / crushing_wheel / mechanical_drill / mechanical_mixer / mechanical_press / speedometer / stressometer …）抓到 `entity_cutout` **3204 条**、`entity_translucent_cull` **14418 条**；两者都用 **blocks.png 图集**（不是生物图集）→ 是方块实体层几何 |
-| 坐标系已判定 | 命中全部走「相机相对」分支（`hitWorld` 恒为 0）→ **提交坐标 = 世界坐标 − 相机位置**，后续切方块局部空间需先加相机 |
-| 需要手部过滤 | 第一人称手/手持物也在 `entity_cutout` 里且贴近相机，会污染小半径捕获 → 已加"距相机 1.5 格内剔除"（工具侧） |
+| 结论      | 证据                                                                                                                                                                                                                                                                                              |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 拦截点有效   | 报告里出现 `entity_cutout` / `entity_solid` / `entity_translucent_cull` / `solid` 四层，全部经过 `BufferSource`                                                                                                                                                                                             |
+| 机器几何抓得到 | 在坐标 (125.5, −59.5, −387.5)（该区块含 12 种 create 方块：belt / chain\_conveyor / crushing\_wheel / mechanical\_drill / mechanical\_mixer / mechanical\_press / speedometer / stressometer …）抓到 `entity_cutout` **3204 条**、`entity_translucent_cull` **14418 条**；两者都用 **blocks.png 图集**（不是生物图集）→ 是方块实体层几何 |
+| 坐标系已判定  | 命中全部走「相机相对」分支（`hitWorld` 恒为 0）→ **提交坐标 = 世界坐标 − 相机位置**，后续切方块局部空间需先加相机                                                                                                                                                                                                                           |
+| 需要手部过滤  | 第一人称手/手持物也在 `entity_cutout` 里且贴近相机，会污染小半径捕获 → 已加"距相机 1.5 格内剔除"（工具侧）                                                                                                                                                                                                                             |
 
 新增工具：`tools/capture_probe.py`（定点捕获 + 报表汇总）、`tools/capture_locate.py`
 （大半径扫描 + 命中聚类，自动定位"哪里有运行期几何"，免人工报坐标）。
@@ -732,12 +730,12 @@ slim.jar 按 Mojang 官方映射（--reverse）重命名作编译类路径，jav
 1. ~~跑原型确认 Flywheel 几何可捕获~~ ✅；
 2. ~~UV 反查图集 sprite → 还原源贴图路径，接回烘焙端~~ ✅（sprite 表）；
 3. ~~捕获实例变换（旋转/平移）~~ ✅（对照 Create/Flywheel 着色器 + 读渲染原点 + 法线同转）；
-4. ~~实机基地跑通：25 状态 / 13 种机器进入 `assets.mcba`~~ ✅；
+4. ~~实机基地跑通：25 状态 / 13 种机器进入~~ ~~`assets.mcba`~~ ✅；
 5. **待办**：规范布局批量导出（孤立 / 直线 / 成对）以扩大覆盖 + 可复现；个别部件的面级 UV 核对；
-   用 Create 附属（实例里的 `ultramarine`）**实证**兼容边界。
+   用第三方模组（如实例里的 `ultramarine`，独立建筑模组）**实证**兼容边界。
 
 **已知限制**：姿态依赖运行状态者只能给"捕获瞬间的姿态"（原理限制，非工具缺陷）；需要真实
-客户端与 GPU；单人游戏（客户端与集成服务端同 JVM）为前提。**附属模组兼容边界**见
+客户端与 GPU；单人游戏（客户端与集成服务端同 JVM）为前提。**模组兼容边界**见
 [docs/运行时几何导出方案.md §11](运行时几何导出方案.md)。
 
 **与 R12 方向 3 的关系**：`_BE_PARTS` 保留——纯资源侧、零游戏依赖、可回归，
@@ -745,18 +743,18 @@ slim.jar 按 Mojang 官方映射（--reverse）重命名作编译类路径，jav
 
 ## 已知缺陷修复追踪
 
-| 编号 | 问题                                     | 状态    |
-| -- | -------------------------------------- | ----- |
-| F1 | 存档模式 palette 需支持 compound 格式           | ✅ 已修复 |
-| F2 | 1.16+ PalettedContainer 位流不跨 long 边界   | ✅ 已修复 |
-| F3 | MCM1 向量化解码 stride 错位                   | ✅ 已修复 |
-| F4 | BYTE\_COLOR 顶点色写 uint8 被钳制为白色（AO/染色失效） | ✅ 已修复 |
-| F5 | 植物方块叠加整方块且未染色（模型判定 + 掩码位序不一致）          | ✅ 已修复 |
-| F6 | 模组方块 UV 误按 texture\_size 归一化（应为 /16）   | ✅ 已修复 |
-| F7 | 群系染色整体斜移一格（`_quad_cells` 的 u/v 轴漏 +1） | ✅ 已修复 |
-| F8 | 烘焙模型面按 floor/ceil 定格，未按面法向（贴边界薄面错一格） | ✅ 已修复 |
-| F9 | 顶点色按 sRGB 值写入 BYTE\_COLOR（`.color` 是线性）→ 染色/AO 被整体提亮约 2.9 倍，观感"偏灰" | ✅ 已修复 |
-| F10 | 草方块侧面 overlay 与基底共面 → Z-Fighting，草皮那层被基底盖住（侧面草皮显示成基底里的平原绿） | ✅ 已修复 |
+| 编号  | 问题                                                                                        | 状态    |
+| --- | ----------------------------------------------------------------------------------------- | ----- |
+| F1  | 存档模式 palette 需支持 compound 格式                                                              | ✅ 已修复 |
+| F2  | 1.16+ PalettedContainer 位流不跨 long 边界                                                      | ✅ 已修复 |
+| F3  | MCM1 向量化解码 stride 错位                                                                      | ✅ 已修复 |
+| F4  | BYTE\_COLOR 顶点色写 uint8 被钳制为白色（AO/染色失效）                                                    | ✅ 已修复 |
+| F5  | 植物方块叠加整方块且未染色（模型判定 + 掩码位序不一致）                                                             | ✅ 已修复 |
+| F6  | 模组方块 UV 误按 texture\_size 归一化（应为 /16）                                                      | ✅ 已修复 |
+| F7  | 群系染色整体斜移一格（`_quad_cells` 的 u/v 轴漏 +1）                                                     | ✅ 已修复 |
+| F8  | 烘焙模型面按 floor/ceil 定格，未按面法向（贴边界薄面错一格）                                                      | ✅ 已修复 |
+| F9  | 顶点色按 sRGB 值写入 BYTE\_COLOR（`.color` 是线性）→ 染色/AO 被整体提亮约 2.9 倍，观感"偏灰"                        | ✅ 已修复 |
+| F10 | 草方块侧面 overlay 与基底共面 → Z-Fighting，草皮那层被基底盖住（侧面草皮显示成基底里的平原绿）                                | ✅ 已修复 |
 | F11 | 活塞/熔炉/工作台等"几何占满整格但**有朝向**"的方块被误判为简单立方体，走程序化立方体路径 → 朝向与正面贴图全部丢失（活塞头贴图跑到错误的面上，水平放置时"UV 错乱"） | ✅ 已修复 |
 
 > F7：`_emit` 里 u/v 轴写的是 `u0 - 1`（格子索引 − 1），故 u/v 格 = 顶点 + 1；
@@ -794,13 +792,13 @@ slim.jar 按 Mojang 官方映射（--reverse）重命名作编译类路径，jav
 > 顶点色因此改成 `rgb = tint x AO`、`a = AO`（AO 单独一份，供基底部分使用，
 > 也正是 `设计方案.md` 原本的设计）。tint 仍来自顶点色 ⇒ 仍随群系变化，而基底
 > （泥土）不会被染色。判据 `AssetPack.overlay_faces()` 要求"去重后是完整 6 面立方体
-> + 叠加层 UV 与基底一致 + 叠加层覆盖该面组的全部方向"，否则退回整模型注入
-> （如 `spawner` 的内外 6 层）。
+>
+> - 叠加层 UV 与基底一致 + 叠加层覆盖该面组的全部方向"，否则退回整模型注入
+>   （如 `spawner` 的内外 6 层）。
 >
 > 实测：草密集区块 面数 1026（与完全没有叠加层的基线**完全相同**，零额外几何），
 > 材质 +1；受控实验（`dist/_overlay_calib.py`，平面铺 1×1 草侧面 + 顶光 π）
 > 实测 sRGB (118.2, 88.5, 59.1) vs 解析 (124.7, 91.6, 62.9)，与上式一致。
-
 
 ## v1.3.1 修复记录（R8 控制模式实机验收）
 
@@ -819,19 +817,20 @@ slim.jar 按 Mojang 官方映射（--reverse）重命名作编译类路径，jav
   ③int(round(22.5)) 银行家舍入成 22 度。注意原版两套符号相反：blockstate 级
   x/y 旋转为负角（TestVariantRotation 7 项对拍为证），元素级为正角。
 - **状态属性序列化名**：stateName() 属性值反射 asString() —— 与遮挡判据同类
-  的重映射问题，模组自定义枚举退化为 toString() 大写（snow_side=NONE），资产包
+  的重映射问题，模组自定义枚举退化为 toString() 大写（snow\_side=NONE），资产包
   规则是小写 -> 变体不命中 -> 整方块（离线扫描走存档 NBT 全是小写，故从未暴露；
   用玩家实况 /api/chunk 普查才抓到）。改用原版 Property.name(value)。
-- **water_cauldron 误判流体**：兜底按"名字含 water"猜液体 -> 含水炼药锅整个被
+- **water\_cauldron 误判流体**：兜底按"名字含 water"猜液体 -> 含水炼药锅整个被
   替换成流体几何。改为 instanceof FluidBlock 精确判定。
 - **LOD 分层移除**（用户决策）：所有距离统一满质量网格，消除远看方块化/拉近
-  重建的闪变；lod1_dist/lod2_dist 面板项随之移除（协议保留 lod 参数）。
+  重建的闪变；lod1\_dist/lod2\_dist 面板项随之移除（协议保留 lod 参数）。
 - **AO 不再烘焙**（用户决策）：Blender 自有光照；合并键少一个 AO 维度，
   矩形拆分更少。
-- **性能**：_fluid_quads 只在液体格 +-1 包围盒内计算（内容顶到 ymax 的体积
-  138ms -> 3ms）；贪心平面内按键分组向量化 + 包围盒内提矩形 + _rects 位运算
-  （单组 158~169ms -> 118ms，输出与旧实现逐位一致，A/B 对拍与 Java 夹具不受
+- **性能**：\_fluid\_quads 只在液体格 +-1 包围盒内计算（内容顶到 ymax 的体积
+  138ms -> 3ms）；贪心平面内按键分组向量化 + 包围盒内提矩形 + \_rects 位运算
+  （单组 158\~169ms -> 118ms，输出与旧实现逐位一致，A/B 对拍与 Java 夹具不受
   影响）；Blender 工作线程 GIL 争抢用 setswitchinterval(0.001) 压制（主线程
   50ms tick 最大漂移 69.6ms -> 33.1ms）。
 - **MCC1 v2**：Section 附带 4x4x4 群系（名表 + 64 下标），控制模式本地网格与
   存档模式共用同一条按群系染色链路；A/B 一致性测试恢复（904 != 909 -> 相等）。
+
